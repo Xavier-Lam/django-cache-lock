@@ -4,7 +4,7 @@ import time
 from django.core.cache import cache
 from django.test import TestCase
 
-from django_lock import DEFAULT_PREFIX, Lock, patch_lock
+from django_lock import DEFAULT_SETTINGS, lock
 
 
 class LockTestCase(TestCase):
@@ -12,16 +12,13 @@ class LockTestCase(TestCase):
     seconds = 0.5
 
     def setUp(self):
-        patch_lock()
-        self.lock = Lock(cache, self.lock_name)
+        self.lock = lock(self.lock_name)
         cache.delete(self.lock.key)
 
     def tearDown(self):
-        self.lock.release()
+        del self.lock
 
     def test_acquire(self):
-        started = time.time()
-
         def locker():
             self.assertTrue(self.lock.acquire(False))
             try:
@@ -29,16 +26,11 @@ class LockTestCase(TestCase):
             finally:
                 self.lock.release()
 
-        t = threading.Thread(target=locker)
-        t.start()
-
-        self.assertFalse(self.lock.acquire(False))
-        self.assertFalse(self.lock.acquire(0.2))
-        self.assertTrue(self.lock.acquire())
-        self.assertGreaterEqual(time.time(), started + self.seconds)
+        self.assertLockSuccess(locker, self.lock)
 
     def test_name(self):
-        self.assertEqual(self.lock.key, DEFAULT_PREFIX + self.lock_name)
+        default_prefix = DEFAULT_SETTINGS["PREFIX"]
+        self.assertEqual(self.lock.key, default_prefix + self.lock_name)
 
         prefix = "prefix:"
         with self.settings(DJANGOLOCK_PREFIX=prefix):
@@ -53,70 +45,72 @@ class LockTestCase(TestCase):
 
     def test_lock(self):
         self.assertTrue(self.lock.acquire(False))
-        key = "another_lock"
-        lock = Lock(cache, key)
-        self.assertTrue(lock.acquire(False))
-        lock.release()
+        name = "another_lock"
+        lock_b = lock(name)
+        self.assertTrue(lock_b.acquire(False))
 
     def test_context(self):
-        started = time.time()
-
         def locker():
-            with cache.lock(self.lock_name):
+            with lock(self.lock_name):
                 time.sleep(self.seconds)
 
-        t = threading.Thread(target=locker)
-        t.start()
-
-        self.assertFalse(self.lock.acquire(False))
-        self.assertFalse(self.lock.acquire(0.2))
-        self.assertTrue(self.lock.acquire())
-        self.assertGreaterEqual(time.time(), started + self.seconds)
+        self.assertLockSuccess(locker, self.lock)
 
     def test_decorator(self):
-        started = time.time()
-
-        @cache.lock(self.lock_name)
+        @lock(self.lock_name)
         def locker():
             time.sleep(self.seconds)
 
-        t = threading.Thread(target=locker)
-        t.start()
-
-        self.assertFalse(self.lock.acquire(False))
-        self.assertFalse(self.lock.acquire(0.2))
-        self.assertTrue(self.lock.acquire())
-        self.assertGreaterEqual(time.time(), started + self.seconds)
+        self.assertLockSuccess(locker, self.lock)
 
     def test_callablename(self):
-        started = time.time()
         name = "1.2"
 
-        @cache.lock(lambda *args: ".".join(args))
+        @lock(lambda *args: ".".join(args))
         def locker(*args):
             time.sleep(self.seconds)
 
-        t = threading.Thread(target=locker, args=name.split("."))
-        t.start()
+        lock_b = lock(name)
+        self.assertLockSuccess(locker, lock_b, args=name.split("."))
 
-        lock = Lock(cache, name)
-        self.assertFalse(lock.acquire(False))
-        self.assertFalse(lock.acquire(0.2))
+    def test_timeout(self):
+        lock_b = lock(self.lock_name, timeout=self.seconds, blocking=False)
+
+        @lock_b
+        def locker():
+            time.sleep(self.seconds*2)
+
+        started = time.time()
+        self.assertLockSuccess(locker, lock_b)
+        self.assertLess(time.time(), started + self.seconds*2)
+
+    def test_sleep(self):
+        self.assertSleep(self.lock, DEFAULT_SETTINGS["SLEEP"])
+
+        sleep = 0.05
+        lock_b = lock(self.lock_name, sleep=sleep)
+        self.assertSleep(lock_b, sleep)
+
+    def test_thread(self):
+        pass
+
+    def assertSleep(self, lock, sleep):
+        started = time.time()
         self.assertTrue(lock.acquire())
-        self.assertGreaterEqual(time.time(), started + self.seconds)
+        time.sleep(self.seconds)
         lock.release()
+        time_diff = time.time() - started
+        self.assertGreater(time_diff, self.seconds - sleep)
+        self.assertLess(time_diff, self.seconds + sleep)
 
-    def test_lockinstancename(self):
+    def assertLockSuccess(self, target, lock, args=()):
         started = time.time()
 
-        @cache.lock(self.lock)
-        def locker():
-            time.sleep(self.seconds)
-
-        t = threading.Thread(target=locker)
+        t = threading.Thread(target=target, args=args)
         t.start()
 
-        self.assertFalse(self.lock.acquire(False))
-        self.assertFalse(self.lock.acquire(0.2))
-        self.assertTrue(self.lock.acquire())
+        time.sleep(0.1)
+        self.assertFalse(lock.acquire(False))
+        self.assertFalse(lock.acquire(0.2))
+        self.assertTrue(lock.acquire(blocking=True))
         self.assertGreaterEqual(time.time(), started + self.seconds)

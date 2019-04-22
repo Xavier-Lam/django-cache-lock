@@ -4,7 +4,7 @@ from __future__ import unicode_literals
 import os
 import re
 
-from setuptools import find_packages, setup
+from setuptools import setup
 
 package = dict()
 
@@ -20,7 +20,7 @@ setup(
     author="Xavier-Lam",
     author_email="Lam.Xavier@hotmail.com",
     url="https://github.com/Xavier-Lam/django-cache-lock",
-    packages=find_packages("django_lock.py"),
+    py_modules=["django_lock"],
     keywords=["django", "cache", "lock"],
     description="A simple lock extension for django's cache.",
     long_description=long_description,

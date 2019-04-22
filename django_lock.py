@@ -7,47 +7,76 @@ import threading
 import uuid
 
 from django.conf import settings
-from django.core.cache import BaseCache
+from django.core.cache import BaseCache, cache
 from django.utils.module_loading import import_string
 
 
-__all__ = ("lock", "Lock", "LockError", "LockedError", "patch_lock")
+__all__ = ("DEFAULT_SETTINGS", "lock", "IncorrectLock", "Locked", "LockError")
 
 
-DEFAULT_PREFIX = "lock:"
+DEFAULT_SETTINGS = dict(
+    PREFIX="lock:",
+    SLEEP=0.1,
+    RELEASEONDEL=True
+)
+
+
+def _get_setting(name):
+    return getattr(settings, "DJANGOLOCK_" + name, DEFAULT_SETTINGS[name])
 
 
 class LockError(ValueError):
     pass
 
 
-class LockedError(LockError):
+class Locked(LockError):
     pass
 
 
-class Lock(object):
+class IncorrectLock(LockError):
+    pass
+
+
+class lock(object):
     """
     A lock class like `redis.lock.Lock`.
     """
 
-    def __init__(self, client, name, timeout=None, sleep=0.1, blocking=True):
+    def __init__(
+        self, name, client=None, timeout=None, sleep=None, blocking=True,
+        token=None, release_on_del=None):
         """
         :type client: django.core.cache.BaseCache
         :type blocking: bool or float
         """
-        self.client = client
-        self.name = name
+        self.client = client or cache
+        if callable(name):
+            self.name_generator = name
+            self.name = None
+        else:
+            self.name_generator = None
+            self.name = name
         self.timeout = timeout
-        self.sleep = sleep
+        self.sleep = sleep or _get_setting("SLEEP")
         self.blocking = blocking
         self.local = threading.local()
         if self.timeout and self.sleep > self.timeout:
-            raise LockError("'sleep' must be less than 'timeout'")
+            raise IncorrectLock("'sleep' must be less than 'timeout'")
+        self.token_generator = token or uuid.uuid1
+        if release_on_del is None:
+            release_on_del = _get_setting("RELEASEONDEL")
+        self.release_on_del = release_on_del
 
     @property
     def key(self):
-        prefix = getattr(settings, "DJANGOLOCK_PREFIX", DEFAULT_PREFIX)
+        prefix = _get_setting("PREFIX")
+        if self.name is None:
+            raise IncorrectLock("lock's name must be str")
         return prefix + self.name
+
+    def acquire_raise(self, blocking=None, token=None):
+        if not self.acquire(blocking, token):
+            raise Locked
 
     def acquire(self, blocking=None, token=None):
         """
@@ -59,19 +88,17 @@ class Lock(object):
         :type blocking: bool or float
         """
         if token is None:
-            token = str(uuid.uuid1())
+            token = str(self.token_generator())
         if blocking is None:
             blocking = self.blocking
-        stop_trying_at = None
-        if isinstance(blocking, (int, float)):
-            stop_trying_at = time.time() + blocking
+        try_started = time.time()
         while True:
             if self._acquire(token):
                 self.local.token = token
                 return True
             if not blocking:
                 return False
-            if stop_trying_at is not None and time.time() > stop_trying_at:
+            if blocking is not True and time.time() - try_started > blocking:
                 return False
             time.sleep(self.sleep)
 
@@ -82,7 +109,10 @@ class Lock(object):
         """
         Releases the already acquired lock
         """
-        self._release()
+        try:
+            self._release()
+        except IncorrectLock:
+            pass
 
     def _release(self):
         self.client.delete(self.key)
@@ -102,76 +132,49 @@ class Lock(object):
         token = self.client.get(self.key)
         return self.local.token is not None and token == self.local.token
 
-
-class lock(object):
-    """
-    A short cut for Lock.
-
-        from django.core.cache import cache
-
-        with cache.lock("global"):
-            pass
-
-        @cache.lock
-        def foo():
-            pass
-
-    """
-    def __init__(self, client, name, timeout=None, sleep=0.1, blocking=True):
-        self.client = client
-        if callable(name):
-            self.name_generator = name
-            self.name = None
-        else:
-            self.name_generator = None
-            self.name = name
-        self.timeout = timeout
-        self.sleep = sleep
-        self.blocking = blocking
-
     def __enter__(self):
-        if isinstance(self.name, Lock):
-            self.lock = self.name
-        else:
-            if callable(self.name):
-                raise ValueError("You can only use callable as name when decorate a function")
-            self.lock = Lock(
-                self.client, self.name, self.timeout, self.sleep,
-                self.blocking)
-
-        if not self.lock.acquire():
-            raise LockedError
-
-        return lock
+        self.acquire_raise()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.lock.release()
+        self.release()
+
+    def __del__(self):
+        self.release_on_del and self.release()
 
     def __call__(self, func):
         @wraps(func)
         def inner(*args, **kwargs):
             if self.name_generator:
                 self.name = self.name_generator(*args, **kwargs)
-            with self:
-                return func(*args, **kwargs)
+            try:
+                with self:
+                    return func(*args, **kwargs)
+            finally:
+                if self.name_generator:
+                    self.name = None
         return inner
 
+    @classmethod
+    def patch_cache(cls):
+        """
+        A dirty method to make lock as an extension method of django's
+        default cache
 
-def patch_lock(locker=None):
-    """A dirty method to make lock as an extension method of django's cache
+            class AppConfig(AppConfig):
+                def ready(self):
+                    from django_lock import lock
+                    lock.patch_cache()
 
-        class AppConfig(AppConfig):
-            def ready(self):
-                from django_lock import patch_lock
-                patch_lock()
-    """
-    locker = locker or lock
+            ...
 
-    def partial_lock(self, name, *args, **kwargs):
-        return locker(self, name, *args, **kwargs)
+            from django.core.cache import cache
+            @cache.lock
+            def foo():
+                pass
 
-    BaseCache.lock = partial_lock
-    for cache in settings.CACHES:
-        backend = settings.CACHES.get(cache)["BACKEND"]
-        cls = import_string(backend)
-        cls.lock = partial_lock
+        """
+        def partial_lock(self, name, *args, **kwargs):
+            return cls(self, name, *args, **kwargs)
+
+        cache.__class__.lock = partial_lock

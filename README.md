@@ -10,24 +10,15 @@ Install django-cache-lock by using pip
 
     pip install django-cache-lock
 
-then patch the django's default cache in wherever you like.
-
-    class AppConfig(AppConfig):
-        def ready(self):
-            import django_lock
-            django_lock.patch_lock()
-
-> ATTENTION: this will replace all your caches' lock method defined in your `settings.CACHE`, include builtin locks like django-redis's lock.
-
 ## Quick Start
 You can work with django-cache-lock by using with-statement or decorator.
 
-        from django.core.cache import cache
+        from django_lock import lock
 
-        with cache.lock("global"):
+        with lock("global"):
             pass
 
-        @cache.lock
+        @lock
         def foo():
             pass
 
