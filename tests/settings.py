@@ -6,8 +6,6 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-ALLOWED_HOSTS = ["example.com"]
-
 DEBUG = True
 
 SECRET_KEY = "fake-key"

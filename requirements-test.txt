@@ -1,0 +1,1 @@
+django-fake-model>=0.1.4

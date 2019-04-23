@@ -1,10 +1,30 @@
 import threading
 import time
 
+from django_fake_model import models as f
 from django.core.cache import cache
+from django.db import models
 from django.test import TestCase
 
-from django_lock import DEFAULT_SETTINGS, lock
+from django_lock import DEFAULT_SETTINGS, lock, lock_model, Locked
+
+
+class Foo(f.FakeModel):
+    bar = models.CharField(max_length=8)
+
+    @lock_model
+    def lock_id_blocking(self):
+        time.sleep(0.5)
+
+    @lock_model(blocking=False)
+    def lock_id(self, blocking=True):
+        time.sleep(0.5)
+
+    @lock_model("bar", blocking=False)
+    def lock_bar(self, blocking=True):
+        if not blocking:
+            return True
+        time.sleep(0.5)
 
 
 class LockTestCase(TestCase):
@@ -39,7 +59,9 @@ class LockTestCase(TestCase):
     def test_token(self):
         self.assertTrue(self.lock.acquire(False))
         try:
-            self.assertEqual(cache.get(self.lock.key), self.lock.local.token)
+            self.assertEqual(
+                cache.get(self.lock.key),
+                getattr(self.lock.local, self.lock_name))
         finally:
             self.lock.release()
 
@@ -94,6 +116,27 @@ class LockTestCase(TestCase):
     def test_thread(self):
         pass
 
+    # @Foo.fake_me
+    # def test_model(self):
+    #     a = Foo.objects.create(bar="a")
+    #     b = Foo.objects.create(bar="b")
+
+    #     threading.Thread(target=a.lock_id_blocking).start()
+    #     self._wait_subthread()
+    #     self.assertTrue(b.lock_id(False))
+    #     self.assertTrue(b.lock_id(False))
+    #     with self.assertRaises(Locked):
+    #         a.lock_id()
+
+    #     threading.Thread(target=a.lock_bar).start()
+    #     self._wait_subthread()
+    #     with self.assertRaises(Locked):
+    #         a.lock_bar()
+    #     with self.assertRaises(Locked):
+    #         Foo(bar=a.bar).lock_bar()
+    #     self.assertTrue(b.lock_bar(False))
+    #     self.assertTrue(b.lock_bar(False))
+
     def assertSleep(self, lock, sleep):
         started = time.time()
         self.assertTrue(lock.acquire())
@@ -109,8 +152,11 @@ class LockTestCase(TestCase):
         t = threading.Thread(target=target, args=args)
         t.start()
 
-        time.sleep(0.1)
+        self._wait_subthread()
         self.assertFalse(lock.acquire(False))
         self.assertFalse(lock.acquire(0.2))
         self.assertTrue(lock.acquire(blocking=True))
         self.assertGreaterEqual(time.time(), started + self.seconds)
+
+    def _wait_subthread(self):
+        time.sleep(0.1)

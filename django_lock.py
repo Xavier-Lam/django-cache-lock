@@ -11,7 +11,9 @@ from django.core.cache import BaseCache, cache
 from django.utils.module_loading import import_string
 
 
-__all__ = ("DEFAULT_SETTINGS", "lock", "IncorrectLock", "Locked", "LockError")
+__all__ = (
+    "DEFAULT_SETTINGS", "IncorrectLock", "lock", "lock_model", "Locked",
+    "LockError")
 
 
 DEFAULT_SETTINGS = dict(
@@ -23,6 +25,10 @@ DEFAULT_SETTINGS = dict(
 
 def _get_setting(name):
     return getattr(settings, "DJANGOLOCK_" + name, DEFAULT_SETTINGS[name])
+
+
+_local = threading.local()
+_global = type("dummy", (object,), dict())
 
 
 class LockError(ValueError):
@@ -44,7 +50,7 @@ class lock(object):
 
     def __init__(
         self, name, client=None, timeout=None, sleep=None, blocking=True,
-        token=None, release_on_del=None):
+        token=None, release_on_del=None, thread_local=True):
         """
         :type client: django.core.cache.BaseCache
         :type blocking: bool or float
@@ -59,13 +65,14 @@ class lock(object):
         self.timeout = timeout
         self.sleep = sleep or _get_setting("SLEEP")
         self.blocking = blocking
-        self.local = threading.local()
+        self.local = _local if thread_local else _global
         if self.timeout and self.sleep > self.timeout:
             raise IncorrectLock("'sleep' must be less than 'timeout'")
         self.token_generator = token or uuid.uuid1
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
+        self._locked = False
 
     @property
     def key(self):
@@ -94,7 +101,6 @@ class lock(object):
         try_started = time.time()
         while True:
             if self._acquire(token):
-                self.local.token = token
                 return True
             if not blocking:
                 return False
@@ -103,18 +109,26 @@ class lock(object):
             time.sleep(self.sleep)
 
     def _acquire(self, token):
-        return self.client.add(self.key, token, self.timeout)
+        if self.client.add(self.key, token, self.timeout):
+            setattr(self.local, self.name, token)
+            return True
+        return False
 
-    def release(self):
+    def release(self, force=False):
         """
         Releases the already acquired lock
         """
         try:
-            self._release()
+            self._release(force)
         except IncorrectLock:
             pass
 
-    def _release(self):
+    def _release(self, force=False):
+        # TODO: use lua script to release redis lock
+        expected_token = getattr(self.local, self.name)
+        token = self.client.get(self.key)
+        if token and token != expected_token and not force:
+            raise LockError("Cannot release a lock that's no longer owned")
         self.client.delete(self.key)
 
     @property
@@ -129,8 +143,9 @@ class lock(object):
         """
         Returns True if this key is locked by this lock, otherwise False.
         """
+        expected_token = getattr(self.local, self.name)
         token = self.client.get(self.key)
-        return self.local.token is not None and token == self.local.token
+        return bool(token and expected_token == token)
 
     def __enter__(self):
         self.acquire_raise()
@@ -140,7 +155,10 @@ class lock(object):
         self.release()
 
     def __del__(self):
-        self.release_on_del and self.release()
+        try:
+            self.release_on_del and self.name and self.release()
+        except:
+            pass
 
     def __call__(self, func):
         @wraps(func)
@@ -178,3 +196,53 @@ class lock(object):
             return cls(self, name, *args, **kwargs)
 
         cache.__class__.lock = partial_lock
+
+
+def lock_model(func_or_args=None, *keys, refresh_from_db=True, **kw):
+    """
+    A shortcut to lock a model instance
+
+        from django.db import models
+        from django_lock import lock_model
+
+        class Foo(models.Model):
+            first_name = models.CharField(max_length=32)
+            last_name = models.CharField(max_length=32)
+
+            @lock_model
+            def bar(self, *args, **kwargs):
+                pass
+
+            @lock_model("first_name", "last_name", blocking=False)
+            def bar(self, *args, **kwargs):
+                pass
+
+    """
+    def _get_name(self, *args, **kwargs):
+        values = [getattr(self, key) for key in keys]
+        kvs = zip(keys, values)
+        # TODO: max length of cache key
+        return ":".join(map(lambda o: ":".join(map(str, o)), kvs))
+
+    def refresh_wrapper(func):
+        @wraps(func)
+        def decorated_func(self, *args, **kwargs):
+            refresh_from_db and self.refresh_from_db()
+            return func(self, *args, **kwargs)
+        return decorated_func
+
+    def decorator(func):
+        return wraps(
+            lock(_get_name, **kw)(
+                refresh_wrapper(func)))
+
+    if func_or_args and callable(func_or_args):
+        keys = ("pk",)
+        return decorator(func_or_args)
+    else:
+        if func_or_args:
+            keys = (func_or_args, ) + keys
+        else:
+            keys = ("pk",)
+
+        return decorator
