@@ -55,37 +55,48 @@ class lock(object):
 
     def __init__(
         self, name, client=None, timeout=None, sleep=None, blocking=True,
-        token=None, release_on_del=None, thread_local=True):
+        token_generator=None, release_on_del=None, thread_local=True):
         """
         :type client: django.core.cache.BaseCache
         :type blocking: bool or float
         """
         self.client = client or cache
         if callable(name):
+            self._name = None
             self.name_generator = name
-            self.name = None
         else:
+            self._name = name
             self.name_generator = None
-            self.name = name
         self.timeout = timeout
         self.sleep = sleep or _get_setting("SLEEP")
         self.blocking = blocking
         self.local = _local if thread_local else _global
         if self.timeout and self.sleep > self.timeout:
             raise IncorrectLock("'sleep' must be less than 'timeout'")
-        self.token_generator = token or uuid.uuid1
+        self.token_generator = token_generator or uuid.uuid1
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
 
     @property
-    def key(self):
-        prefix = _get_setting("PREFIX")
-        if self.name is None:
+    def name(self):
+        if not self._name:
             raise IncorrectLock("lock's name must be str")
+        return self._name
+
+    @property
+    def key(self):
+        """
+        The lock's key stores in the cache
+        """
+        prefix = _get_setting("PREFIX")
         return prefix + self.name
 
     def acquire_raise(self, blocking=None, token=None):
+        """
+        Raise an `django_lock.Locked` error when acquire failed
+        :raises: django_lock.Locked
+        """
         if not self.acquire(blocking, token):
             raise Locked
 
@@ -97,6 +108,7 @@ class lock(object):
                          maximum amount of time in seconds to spend trying to
                          acquire the lock
         :type blocking: bool or float
+        :type token: str
         """
         if token is None:
             token = str(self.token_generator())
@@ -121,6 +133,7 @@ class lock(object):
     def release(self, force=False):
         """
         Releases the already acquired lock
+        :param force: Force to release lock without checking owned
         """
         token = getattr(self.local, self.name)
         if not token and not force:
@@ -135,11 +148,11 @@ class lock(object):
     def _release(self, token, force=False):
         # TODO: use lua script to release redis lock
         locked_token = self.client.get(self.key)
-        if token and token != locked_token and not force:
+        if token != locked_token and not force:
             warnings.warn(
                 "Cannot release a lock that's no longer owned", LockWarning)
-            return
-        self.client.delete(self.key)
+        else:
+            self.client.delete(self.key)
 
     @property
     def locked(self):
@@ -184,11 +197,14 @@ class lock(object):
 
     @classmethod
     def _from_lock(cls, lock, **kwargs):
-        """:type lock: django_lock.lock"""
+        """
+        Create a lock from another
+        :type lock: django_lock.lock
+        """
         defaults = dict(
-            name=lock.name, client=lock.client, timeout=lock.timeout,
+            name=lock._name, client=lock.client, timeout=lock.timeout,
             sleep=lock.sleep, blocking=lock.blocking,
-            token=lock.token_generator,
+            token_generator=lock.token_generator,
             release_on_del=lock.release_on_del,
             thread_local=lock.local is _local)
         defaults.update(kwargs)
