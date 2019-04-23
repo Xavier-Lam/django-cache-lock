@@ -10,7 +10,7 @@ from django.test.utils import get_runner
 
 
 def main():
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings.locmem")
     django.setup()
     TestRunner = get_runner(settings)
     test_runner = TestRunner()

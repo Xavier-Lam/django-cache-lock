@@ -5,6 +5,7 @@ from functools import wraps
 import time
 import threading
 import uuid
+import warnings
 
 from django.conf import settings
 from django.core.cache import BaseCache, cache
@@ -29,6 +30,10 @@ def _get_setting(name):
 
 _local = threading.local()
 _global = type("dummy", (object,), dict())
+
+
+class LockWarning(Warning):
+    pass
 
 
 class LockError(ValueError):
@@ -72,7 +77,6 @@ class lock(object):
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
-        self._locked = False
 
     @property
     def key(self):
@@ -118,17 +122,23 @@ class lock(object):
         """
         Releases the already acquired lock
         """
+        token = getattr(self.local, self.name)
+        if not token and not force:
+            raise LockWarning("Cannot release an unlocked lock")
+        setattr(self.local, self.name, None)
+
         try:
-            self._release(force)
+            self._release(token, force)
         except IncorrectLock:
             pass
 
-    def _release(self, force=False):
+    def _release(self, token, force=False):
         # TODO: use lua script to release redis lock
-        expected_token = getattr(self.local, self.name)
-        token = self.client.get(self.key)
-        if token and token != expected_token and not force:
-            raise LockError("Cannot release a lock that's no longer owned")
+        locked_token = self.client.get(self.key)
+        if token and token != locked_token and not force:
+            warnings.warn(
+                "Cannot release a lock that's no longer owned", LockWarning)
+            return
         self.client.delete(self.key)
 
     @property
@@ -164,14 +174,25 @@ class lock(object):
         @wraps(func)
         def inner(*args, **kwargs):
             if self.name_generator:
-                self.name = self.name_generator(*args, **kwargs)
-            try:
-                with self:
-                    return func(*args, **kwargs)
-            finally:
-                if self.name_generator:
-                    self.name = None
+                name = self.name_generator(*args, **kwargs)
+                context = self._from_lock(self, name=name)
+            else:
+                context = self
+            with context:
+                return func(*args, **kwargs)
         return inner
+
+    @classmethod
+    def _from_lock(cls, lock, **kwargs):
+        """:type lock: django_lock.lock"""
+        defaults = dict(
+            name=lock.name, client=lock.client, timeout=lock.timeout,
+            sleep=lock.sleep, blocking=lock.blocking,
+            token=lock.token_generator,
+            release_on_del=lock.release_on_del,
+            thread_local=lock.local is _local)
+        defaults.update(kwargs)
+        return cls(**defaults)
 
     @classmethod
     def patch_cache(cls):
@@ -198,7 +219,7 @@ class lock(object):
         cache.__class__.lock = partial_lock
 
 
-def lock_model(func_or_args=None, *keys, refresh_from_db=True, **kw):
+def lock_model(func_or_args=None, *keys, refresh_from_db=False, **kw):
     """
     A shortcut to lock a model instance
 
@@ -232,7 +253,7 @@ def lock_model(func_or_args=None, *keys, refresh_from_db=True, **kw):
         return decorated_func
 
     def decorator(func):
-        return wraps(
+        return wraps(func)(
             lock(_get_name, **kw)(
                 refresh_wrapper(func)))
 
