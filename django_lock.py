@@ -8,7 +8,9 @@ import uuid
 import warnings
 
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import cache, DefaultCacheProxy
+from django.core.cache.backends.db import BaseDatabaseCache
+from django.utils.module_loading import import_string
 
 
 __all__ = (
@@ -21,6 +23,14 @@ DEFAULT_SETTINGS = dict(
     SLEEP=0.1,
     RELEASEONDEL=True
 )
+
+
+def _backend_cls(client):
+    backend_cls = type(client)
+    if backend_cls is DefaultCacheProxy:
+        cls = settings.CACHES["default"]["BACKEND"]
+        backend_cls = import_string(cls)
+    return backend_cls
 
 
 def _get_setting(name):
@@ -63,6 +73,10 @@ class lock(object):
         :type blocking: bool or float
         """
         self.client = client or cache
+        backend_cls = _backend_cls(self.client)
+        if issubclass(backend_cls, BaseDatabaseCache) and not thread_local:
+            raise NotImplementedError(
+                "We don't support database cache in multi thread environment")
         if callable(name):
             self._name = None
             self.name_generator = name
@@ -211,7 +225,7 @@ class lock(object):
             sleep=lock.sleep, blocking=lock.blocking,
             token_generator=lock.token_generator,
             release_on_del=lock.release_on_del,
-            thread_local=lock.local is threading.local)
+            thread_local=isinstance(lock.local, threading.local))
         defaults.update(kwargs)
         return cls(**defaults)
 

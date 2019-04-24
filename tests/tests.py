@@ -12,10 +12,13 @@ import warnings
 
 import django
 from django_fake_model import models as f
+from django.conf import settings
 from django.core.cache import cache
+from django.core.cache.backends.db import BaseDatabaseCache
 from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
+from django.utils.module_loading import import_string
 
 from django_lock import (
     DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
@@ -69,23 +72,17 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(self.lock.locked)
 
     def test_timeout(self):
-        started = time.time()
         timeout = 0.3
         lock_a = lock(self.lock_name, timeout=timeout)
 
-        def try_lock():
-            self.assertFalse(lock_a.acquire(False))
-            self.assertTrue(lock_a.acquire())
-            diff = time.time() - started
-            self.assertGreaterEqual(diff, timeout)
-            self.assertLessEqual(diff, timeout + lock_a.sleep)
-            lock_a.release()
-            self.assertFalse(lock_a.locked)
-
-        t = threading.Thread(target=try_lock)
+        started = time.time()
         self.assertTrue(lock_a.acquire(False))
-        t.start()
-        t.join()
+        self.assertTrue(self.lock.acquire())
+        diff = time.time() - started
+        self.assertGreaterEqual(diff, timeout)
+        self.assertLessEqual(diff, timeout + self.lock.sleep)
+        self.lock.release()
+        self.assertFalse(lock_a.locked)
         self.assertWarns(LockWarning, lock_a.release)
 
     def test_block(self):
@@ -169,6 +166,12 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(lock_a.owned)
 
     def test_thread(self):
+        cls = import_string(settings.CACHES["default"]["BACKEND"])
+        if issubclass(cls, BaseDatabaseCache):
+            self.assertRaises(
+                NotImplementedError, lock, "lock_b", thread_local=False)
+            return
+
         unsafe_lock = lock("lock_b", thread_local=False)
 
         def another_thread():
@@ -176,10 +179,10 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
             self.assertTrue(self.lock.locked)
             unsafe_lock.release()
             self.assertFalse(unsafe_lock.locked)
-        t = threading.Thread(target=another_thread)
 
         self.assertTrue(self.lock.acquire())
         self.assertTrue(unsafe_lock.acquire())
+        t = threading.Thread(target=another_thread)
         t.start()
         t.join()
         self.assertTrue(self.lock.locked)
