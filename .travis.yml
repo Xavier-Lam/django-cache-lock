@@ -4,20 +4,23 @@ language: python
 
 matrix:
   include:
-    - env: TOX_ENV=py27-django111-{locmem,file,memcached,database,redis}
+    - env: TOX_ENV='py27-django111-{locmem,file,memcached,sqlite,mysql,redis}'
       python: "2.7"
-    - env: TOX_ENV=py34-django{111,20}-{locmem,file,memcached,database,redis}
+    - env: TOX_ENV='py34-django{111,20}-{locmem,file,memcached,sqlite,mysql,redis}'
       python: "3.4"
-    - env: TOX_ENV=py35-django{111,20,21,22}-{locmem,file,memcached,database,redis}
+    - env: TOX_ENV='py35-django{111,20,21,22}-{locmem,file,memcached,sqlite,mysql,redis}'
       python: "3.5"
-    - env: TOX_ENV=py36-django{111,20,21,22}-{locmem,file,memcached,database,redis}
+    - env: TOX_ENV='py36-django{111,20,21,22}-{locmem,file,memcached,sqlite,mysql,redis}'
       python: "3.6"
-    - env: TOX_ENV=py37-django{111,20,21,22}-{locmem,file,memcached,database,redis}
+    - env: TOX_ENV='py37-django{111,20,21,22}-{locmem,file,memcached,sqlite,mysql,redis}'
       python: "3.7"
 
 branches:
   only:
     - master
+
+before_install:
+  - mysql -e 'CREATE DATABASE IF NOT EXISTS test;'
 
 install:
   - pip install tox
@@ -27,3 +30,4 @@ script: tox . -e $TOX_ENV
 services:
   - redis-server
   - memcached
+  - mysql

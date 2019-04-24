@@ -10,12 +10,12 @@ except ImportError:
     from unittest2 import TestCase as BaseTestCase
 import warnings
 
+import django
 from django_fake_model import models as f
 from django.core.cache import cache
 from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
-import six
 
 from django_lock import (
     DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
@@ -27,7 +27,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     @classmethod
     def setUpClass(cls):
         super(LockTestCase, cls).setUpClass()
-        if six.PY3:
+        if django.VERSION[0] == 2:
             schema.DatabaseSchemaEditor.__enter__ = \
                 schema.BaseDatabaseSchemaEditor.__enter__
         warnings.simplefilter("ignore")
@@ -80,13 +80,13 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
             self.assertGreaterEqual(diff, timeout)
             self.assertLessEqual(diff, timeout + lock_a.sleep)
             lock_a.release()
+            self.assertFalse(lock_a.locked)
 
         t = threading.Thread(target=try_lock)
         self.assertTrue(lock_a.acquire(False))
         t.start()
-        time.sleep(timeout*2)
-        self.assertWarns(LockWarning, lock_a.release)
         t.join()
+        self.assertWarns(LockWarning, lock_a.release)
 
     def test_block(self):
         block = 0.2
