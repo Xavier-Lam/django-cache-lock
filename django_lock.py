@@ -5,11 +5,12 @@ from functools import wraps
 import time
 import threading
 import uuid
-import warnings
+from warnings import warn
 
 from django.conf import settings
 from django.core.cache import cache, DefaultCacheProxy
 from django.core.cache.backends.db import BaseDatabaseCache
+from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.utils.module_loading import import_string
 
 
@@ -74,24 +75,36 @@ class lock(object):
         """
         self.client = client or cache
         backend_cls = _backend_cls(self.client)
-        if issubclass(backend_cls, BaseDatabaseCache) and not thread_local:
+        if issubclass(backend_cls, BaseDatabaseCache):
             raise NotImplementedError(
-                "We don't support database cache in multi thread environment")
+                "We don't support database cache currently")
+
         if callable(name):
             self._name = None
             self.name_generator = name
         else:
             self._name = name
             self.name_generator = None
-        self.timeout = timeout
-        self.sleep = sleep or _get_setting("SLEEP")
+
         self.blocking = blocking
+        self.sleep = sleep or _get_setting("SLEEP")
+
+        if issubclass(backend_cls, BaseMemcachedCache):
+            # memcached only support int timeout
+            if timeout and not isinstance(timeout, int):
+                warn(
+                    "memcached only support int timeout, your time out will "
+                    "be parse to int, timeout less than one second will be "
+                    "treated as lock forever", LockWarning)
+                timeout = int(timeout)
+        if timeout and self.sleep > timeout:
+            warn("'sleep' should be less than 'timeout'", LockWarning)
+        self.timeout = timeout or None
+
         local_cls = threading.local if thread_local else type(
             str("dummy"), (object,), dict())
         self.local = local_cls()
-        if self.timeout and self.sleep > self.timeout:
-            warnings.warn(
-                "'sleep' should be less than 'timeout'", IncorrectLock)
+
         self.token_generator = token_generator or uuid.uuid1
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
@@ -156,7 +169,7 @@ class lock(object):
         """
         token = getattr(self.local, "token", None)
         if not token and not force:
-            warnings.warn("Cannot release an unlocked lock", LockWarning)
+            warn("Cannot release an unlocked lock", LockWarning)
             return
 
         try:
@@ -169,7 +182,7 @@ class lock(object):
         setattr(self.local, "token", None)
         locked_token = self.client.get(self.key)
         if token != locked_token and not force:
-            warnings.warn(
+            warn(
                 "Cannot release a lock that's no longer owned", LockWarning)
         else:
             self.client.delete(self.key)

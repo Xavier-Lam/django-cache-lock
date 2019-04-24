@@ -12,16 +12,14 @@ import warnings
 
 import django
 from django_fake_model import models as f
-from django.conf import settings
 from django.core.cache import cache
-from django.core.cache.backends.db import BaseDatabaseCache
+from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
-from django.utils.module_loading import import_string
 
 from django_lock import (
-    DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
+    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
 
 
 class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
@@ -72,7 +70,11 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(self.lock.locked)
 
     def test_timeout(self):
-        timeout = 0.3
+        cls = _backend_cls(self.lock.client)
+        if issubclass(cls, BaseMemcachedCache):
+            timeout = 1
+        else:
+            timeout = 0.3
         lock_a = lock(self.lock_name, timeout=timeout)
 
         started = time.time()
@@ -166,12 +168,6 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(lock_a.owned)
 
     def test_thread(self):
-        cls = import_string(settings.CACHES["default"]["BACKEND"])
-        if issubclass(cls, BaseDatabaseCache):
-            self.assertRaises(
-                NotImplementedError, lock, "lock_b", thread_local=False)
-            return
-
         unsafe_lock = lock("lock_b", thread_local=False)
 
         def another_thread():
