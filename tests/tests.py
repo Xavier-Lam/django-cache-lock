@@ -1,58 +1,44 @@
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+
 import threading
 import time
+try:
+    from unittest import mock, TestCase as BaseTestCase
+except ImportError:
+    import mock
+    from unittest2 import TestCase as BaseTestCase
+import warnings
 
 from django_fake_model import models as f
 from django.core.cache import cache
 from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
+import six
 
-from django_lock import DEFAULT_SETTINGS, lock, lock_model, Locked
-
-
-schema.DatabaseSchemaEditor.__enter__ = schema.BaseDatabaseSchemaEditor.__enter__
-
-
-class Foo(f.FakeModel):
-    bar = models.CharField(max_length=8)
-
-    @lock_model
-    def lock_id_blocking(self):
-        time.sleep(0.5)
-
-    @lock_model(blocking=False)
-    def lock_id(self, blocking=True):
-        if not blocking:
-            return True
-        time.sleep(0.5)
-
-    @lock_model("bar", blocking=False)
-    def lock_bar(self, blocking=True):
-        if not blocking:
-            return True
-        time.sleep(0.5)
+from django_lock import (
+    DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
 
 
-class LockTestCase(TestCase):
+class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     lock_name = "lock"
-    seconds = 0.5
+
+    @classmethod
+    def setUpClass(cls):
+        super(LockTestCase, cls).setUpClass()
+        if six.PY3:
+            schema.DatabaseSchemaEditor.__enter__ = \
+                schema.BaseDatabaseSchemaEditor.__enter__
+        warnings.simplefilter("ignore")
 
     def setUp(self):
         self.lock = lock(self.lock_name)
         cache.delete(self.lock.key)
 
     def tearDown(self):
+        self.lock.release(True)
         del self.lock
-
-    def test_acquire(self):
-        def locker():
-            self.assertTrue(self.lock.acquire(False))
-            try:
-                time.sleep(self.seconds)
-            finally:
-                self.lock.release()
-
-        self.assertLockSuccess(locker, self.lock)
 
     def test_name(self):
         default_prefix = DEFAULT_SETTINGS["PREFIX"]
@@ -62,117 +48,191 @@ class LockTestCase(TestCase):
         with self.settings(DJANGOLOCK_PREFIX=prefix):
             self.assertEqual(self.lock.key, prefix + self.lock_name)
 
-    def test_token(self):
+    def test_acquire(self):
         self.assertTrue(self.lock.acquire(False))
-        try:
-            self.assertEqual(
-                cache.get(self.lock.key),
-                getattr(self.lock.local, self.lock_name))
-        finally:
-            self.lock.release()
+        self.assertFalse(self.lock.acquire(False))
+        self.assertRaises(Locked, self.lock.acquire_raise, blocking=False)
 
-    def test_lock(self):
+        lock_a = lock("lock_a")
+        self.assertTrue(lock_a.acquire(False))
+        self.assertFalse(lock_a.acquire(False))
+        self.lock.release()
+        lock_a.release()
         self.assertTrue(self.lock.acquire(False))
-        name = "another_lock"
-        lock_b = lock(name)
-        self.assertTrue(lock_b.acquire(False))
 
-    def test_context(self):
-        def locker():
-            with lock(self.lock_name):
-                time.sleep(self.seconds)
-
-        self.assertLockSuccess(locker, self.lock).join()
-
-    def test_decorator(self):
-        @lock(self.lock_name)
-        def locker():
-            time.sleep(self.seconds)
-
-        self.assertLockSuccess(locker, self.lock).join()
-
-    def test_callablename(self):
-        name = "1.2"
-
-        @lock(lambda *args, **kwargs: ".".join(args), blocking=False)
-        def locker(*args, blocking=True):
-            if not blocking:
-                return True
-            time.sleep(self.seconds)
-
-        lock_b = lock(name)
-        t = self.assertLockSuccess(locker, lock_b, args=name.split("."))
-        self.assertTrue(locker("3", blocking=False))
-        t.join()
+    def test_release(self):
+        self.assertTrue(self.lock.acquire())
+        lock_a = lock(self.lock_name)
+        self.assertWarns(LockWarning, lock_a.release)
+        self.assertTrue(self.lock.locked)
+        self.lock.release()
+        self.assertFalse(self.lock.locked)
 
     def test_timeout(self):
-        lock_b = lock(self.lock_name, timeout=self.seconds, blocking=False)
-
-        @lock_b
-        def locker():
-            time.sleep(self.seconds*2)
-
         started = time.time()
-        t = self.assertLockSuccess(locker, lock_b)
-        self.assertLess(time.time(), started + self.seconds*2)
+        timeout = 0.3
+        lock_a = lock(self.lock_name, timeout=timeout)
+
+        def try_lock():
+            self.assertFalse(lock_a.acquire(False))
+            self.assertTrue(lock_a.acquire())
+            diff = time.time() - started
+            self.assertGreaterEqual(diff, timeout)
+            self.assertLessEqual(diff, timeout + lock_a.sleep)
+            lock_a.release()
+
+        t = threading.Thread(target=try_lock)
+        self.assertTrue(lock_a.acquire(False))
+        t.start()
+        time.sleep(timeout*2)
+        self.assertWarns(LockWarning, lock_a.release)
         t.join()
+
+    def test_block(self):
+        block = 0.2
+        lock_a = lock(self.lock_name, blocking=block)
+        with lock_a:
+            started = time.time()
+            self.assertFalse(lock_a.acquire())
+            diff = time.time() - started
+            self.assertGreaterEqual(diff, block)
+            self.assertLess(diff, block + lock_a.sleep)
+
+            block = 0.1
+            self.assertFalse(lock_a.acquire(block))
+            diff = time.time() - started - diff
+            self.assertGreaterEqual(diff, block)
+            self.assertLess(diff, block + lock_a.sleep)
 
     def test_sleep(self):
-        self.assertSleep(self.lock, DEFAULT_SETTINGS["SLEEP"])
+        count = 3
+        sleep = DEFAULT_SETTINGS["SLEEP"]
+        lock_a = lock(self.lock_name, sleep=sleep)
+        with lock_a:
+            with mock.patch.object(lock, "_acquire"):
+                lock._acquire.return_value = False
+                block = sleep*count + sleep/2
+                self.assertFalse(lock_a.acquire(block))
+                self.assertEqual(lock._acquire.call_count, count + 2)
 
-        sleep = 0.05
-        lock_b = lock(self.lock_name, sleep=sleep)
-        self.assertSleep(lock_b, sleep)
+            with mock.patch.object(lock, "_acquire"):
+                sleep = 0.05
+                lock._acquire.return_value = False
+                lock_b = lock(self.lock_name, sleep=sleep)
+                block = sleep*count + sleep/2
+                self.assertFalse(lock_b.acquire(block))
+                self.assertEqual(lock._acquire.call_count, count + 2)
+
+    def test_token(self):
+        with self.lock:
+            self.assertEqual(
+                cache.get(self.lock.key),
+                getattr(self.lock.local, "token"))
+
+    def test_context(self):
+        with self.lock:
+            self.assertTrue(self.lock.locked)
+        self.assertFalse(self.lock.locked)
+
+    def test_decorator(self):
+        lock_a = lock(self.lock_name, blocking=False)
+
+        @lock_a
+        def resource():
+            self.assertTrue(lock_a.locked)
+            self.assertRaises(Locked, resource)
+
+        self.assertEqual(resource.__name__, "resource")
+        resource()
+        self.assertFalse(lock_a.locked)
+
+    def test_dynamicname(self):
+        name = "1.2"
+        lock_b = lock(name)
+
+        def name_generator(*args, **kwargs):
+            return ".".join(args)
+
+        @lock(name_generator, blocking=False)
+        def resource(*args):
+            self.assertTrue(lock_b.locked)
+            self.assertRaises(Locked, resource, *name.split("."))
+
+        self.assertEqual(resource.__name__, "resource")
+        resource(*name.split("."))
+        self.assertFalse(lock_b.locked)
+
+    def test_owned(self):
+        lock_a = lock(self.lock_name)
+        self.assertTrue(self.lock.acquire())
+        self.assertTrue(self.lock.owned)
+        self.assertFalse(lock_a.owned)
 
     def test_thread(self):
-        pass
+        unsafe_lock = lock("lock_b", thread_local=False)
 
-    @Foo.fake_me
+        def another_thread():
+            self.assertWarns(LockWarning, self.lock.release)
+            self.assertTrue(self.lock.locked)
+            unsafe_lock.release()
+            self.assertFalse(unsafe_lock.locked)
+        t = threading.Thread(target=another_thread)
+
+        self.assertTrue(self.lock.acquire())
+        self.assertTrue(unsafe_lock.acquire())
+        t.start()
+        t.join()
+        self.assertTrue(self.lock.locked)
+        self.assertFalse(unsafe_lock.locked)
+
     def test_model(self):
-        a = Foo.objects.create(bar="a")
-        b = Foo.objects.create(bar="b")
+        class Foo(f.FakeModel):
+            bar = models.CharField(max_length=8)
 
-        t = threading.Thread(target=a.lock_id_blocking)
-        t.start()
-        self._wait_subthread()
-        self.assertTrue(b.lock_id(False))
-        self.assertTrue(b.lock_id(False))
-        with self.assertRaises(Locked):
-            a.lock_id()
-        t.join()
+            @lock_model
+            def lock_id_no_arg(self, callback=None):
+                callback and callback()
 
-        t = threading.Thread(target=a.lock_bar)
-        t.start()
-        self._wait_subthread()
-        with self.assertRaises(Locked):
-            a.lock_bar()
-        with self.assertRaises(Locked):
-            Foo(bar=a.bar).lock_bar()
-        self.assertTrue(b.lock_bar(False))
-        self.assertTrue(b.lock_bar(False))
-        t.join()
+            @lock_model(blocking=False)
+            def lock_id(self, callback=None):
+                callback and callback()
 
-    def assertSleep(self, lock, sleep):
-        started = time.time()
-        self.assertTrue(lock.acquire())
-        time.sleep(self.seconds)
-        lock.release()
-        time_diff = time.time() - started
-        self.assertGreater(time_diff, self.seconds - sleep)
-        self.assertLess(time_diff, self.seconds + sleep)
+            @lock_model("bar", blocking=False)
+            def lock_bar(self, callback=None):
+                callback and callback()
 
-    def assertLockSuccess(self, target, lock, args=()):
-        started = time.time()
+            @property
+            def pk_lockname(self):
+                return "pk:" + str(self.id)
 
-        t = threading.Thread(target=target, args=args)
-        t.start()
+            @property
+            def bar_lockname(self):
+                return "bar:" + str(self.bar)
 
-        self._wait_subthread()
-        self.assertFalse(lock.acquire(False))
-        self.assertFalse(lock.acquire(0.2))
-        self.assertTrue(lock.acquire(blocking=True))
-        self.assertGreaterEqual(time.time(), started + self.seconds)
-        return t
+        @Foo.fake_me
+        def test_method():
+            a = Foo.objects.create(bar="a")
+            b = Foo.objects.create(bar="b")
 
-    def _wait_subthread(self):
-        time.sleep(0.1)
+            self.assertEqual(a.lock_id_no_arg.__name__, "lock_id_no_arg")
+            self.assertEqual(a.lock_id.__name__, "lock_id")
+            self.assertEqual(a.lock_bar.__name__, "lock_bar")
+
+            def callback():
+                self.assertTrue(lock(a.pk_lockname).locked)
+                self.assertFalse(lock(b.pk_lockname).locked)
+                self.assertRaises(Locked, a.lock_id)
+            a.lock_id_no_arg(callback)
+            self.assertFalse(lock(a.pk_lockname).locked)
+
+            a.lock_id(callback)
+            self.assertFalse(lock(a.pk_lockname).locked)
+
+            def callback():
+                self.assertTrue(lock(a.bar_lockname).locked)
+                self.assertFalse(lock(b.bar_lockname).locked)
+                self.assertRaises(Locked, a.lock_bar)
+            a.lock_bar(callback)
+            self.assertFalse(lock(a.bar_lockname).locked)
+
+        test_method()

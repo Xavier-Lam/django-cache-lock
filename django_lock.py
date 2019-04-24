@@ -8,8 +8,7 @@ import uuid
 import warnings
 
 from django.conf import settings
-from django.core.cache import BaseCache, cache
-from django.utils.module_loading import import_string
+from django.core.cache import cache
 
 
 __all__ = (
@@ -28,11 +27,7 @@ def _get_setting(name):
     return getattr(settings, "DJANGOLOCK_" + name, DEFAULT_SETTINGS[name])
 
 
-_local = threading.local()
-_global = type("dummy", (object,), dict())
-
-
-class LockWarning(Warning):
+class LockWarning(RuntimeWarning):
     pass
 
 
@@ -57,6 +52,13 @@ class lock(object):
         self, name, client=None, timeout=None, sleep=None, blocking=True,
         token_generator=None, release_on_del=None, thread_local=True):
         """
+        :param timeout: indicates a maximum life for the lock. By default,
+                        it will remain locked until release() is called.
+        :type timeout: float
+        :param sleep: indicates the amount of time to sleep per loop iteration
+                      when the lock is in blocking mode and another client is
+                      currently holding the lock.
+        :type sleep: float
         :type client: django.core.cache.BaseCache
         :type blocking: bool or float
         """
@@ -70,9 +72,12 @@ class lock(object):
         self.timeout = timeout
         self.sleep = sleep or _get_setting("SLEEP")
         self.blocking = blocking
-        self.local = _local if thread_local else _global
+        local_cls = threading.local if thread_local else type(
+            str("dummy"), (object,), dict())
+        self.local = local_cls()
         if self.timeout and self.sleep > self.timeout:
-            raise IncorrectLock("'sleep' must be less than 'timeout'")
+            warnings.warn(
+                "'sleep' should be less than 'timeout'", IncorrectLock)
         self.token_generator = token_generator or uuid.uuid1
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
@@ -126,7 +131,7 @@ class lock(object):
 
     def _acquire(self, token):
         if self.client.add(self.key, token, self.timeout):
-            setattr(self.local, self.name, token)
+            self.local.token = token
             return True
         return False
 
@@ -135,10 +140,10 @@ class lock(object):
         Releases the already acquired lock
         :param force: Force to release lock without checking owned
         """
-        token = getattr(self.local, self.name)
+        token = getattr(self.local, "token", None)
         if not token and not force:
-            raise LockWarning("Cannot release an unlocked lock")
-        setattr(self.local, self.name, None)
+            warnings.warn("Cannot release an unlocked lock", LockWarning)
+            return
 
         try:
             self._release(token, force)
@@ -147,6 +152,7 @@ class lock(object):
 
     def _release(self, token, force=False):
         # TODO: use lua script to release redis lock
+        setattr(self.local, "token", None)
         locked_token = self.client.get(self.key)
         if token != locked_token and not force:
             warnings.warn(
@@ -166,9 +172,8 @@ class lock(object):
         """
         Returns True if this key is locked by this lock, otherwise False.
         """
-        expected_token = getattr(self.local, self.name)
-        token = self.client.get(self.key)
-        return bool(token and expected_token == token)
+        token = getattr(self.local, "token", None)
+        return bool(token and token == self.client.get(self.key))
 
     def __enter__(self):
         self.acquire_raise()
@@ -180,7 +185,7 @@ class lock(object):
     def __del__(self):
         try:
             self.release_on_del and self.name and self.release()
-        except:
+        except Exception:
             pass
 
     def __call__(self, func):
@@ -206,7 +211,7 @@ class lock(object):
             sleep=lock.sleep, blocking=lock.blocking,
             token_generator=lock.token_generator,
             release_on_del=lock.release_on_del,
-            thread_local=lock.local is _local)
+            thread_local=lock.local is threading.local)
         defaults.update(kwargs)
         return cls(**defaults)
 
@@ -235,9 +240,11 @@ class lock(object):
         cache.__class__.lock = partial_lock
 
 
-def lock_model(func_or_args=None, *keys, refresh_from_db=False, **kw):
+def lock_model(func_or_args=None, *keys, **kw):
     """
     A shortcut to lock a model instance
+
+    :param refresh_from_db: reload model from database if locked success
 
         from django.db import models
         from django_lock import lock_model
@@ -255,6 +262,8 @@ def lock_model(func_or_args=None, *keys, refresh_from_db=False, **kw):
                 pass
 
     """
+    refresh_from_db = kw.pop("refresh_from_db", True)
+
     def _get_name(self, *args, **kwargs):
         values = [getattr(self, key) for key in keys]
         kvs = zip(keys, values)
