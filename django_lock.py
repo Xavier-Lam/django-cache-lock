@@ -172,18 +172,14 @@ class lock(object):
             warn("Cannot release an unlocked lock", LockWarning)
             return
 
-        try:
-            self._release(token, force)
-        except IncorrectLock:
-            pass
+        self._release(token, force)
 
     def _release(self, token, force=False):
         # TODO: use lua script to release redis lock
         setattr(self.local, "token", None)
         locked_token = self.client.get(self.key)
         if token != locked_token and not force:
-            warn(
-                "Cannot release a lock that's no longer owned", LockWarning)
+            warn("Cannot release a lock that's no longer owned", LockWarning)
         else:
             self.client.delete(self.key)
 

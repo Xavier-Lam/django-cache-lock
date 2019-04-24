@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 
 import threading
 import time
+from unittest import skipUnless
 try:
     from unittest import mock, TestCase as BaseTestCase
 except ImportError:
@@ -64,6 +65,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     def test_release(self):
         self.assertTrue(self.lock.acquire())
         lock_a = lock(self.lock_name)
+        # redis in python2.7 sometimes not raise LockWarning
         self.assertWarns(LockWarning, lock_a.release)
         self.assertTrue(self.lock.locked)
         self.lock.release()
@@ -86,6 +88,21 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.lock.release()
         self.assertFalse(lock_a.locked)
         self.assertWarns(LockWarning, lock_a.release)
+
+    @skipUnless(
+        issubclass(_backend_cls(cache), BaseMemcachedCache),
+        "only called when using memcached backend")
+    def test_memcached(self):
+        sleep = 0.1
+        timeout = 1
+        key = value = "debug"
+        started = time.time()
+        cache.add(key, value, timeout)
+        while not cache.add(key, value, timeout):
+            time.sleep(sleep)
+        diff = time.time() - started
+        self.assertGreaterEqual(diff, timeout)
+        self.assertLessEqual(diff, timeout + sleep)
 
     def test_block(self):
         block = 0.2
