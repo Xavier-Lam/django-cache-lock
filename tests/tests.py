@@ -3,7 +3,7 @@ from __future__ import unicode_literals
 
 import threading
 import time
-from unittest import skipUnless
+from unittest import skipIf, skipUnless
 try:
     from unittest import mock, TestCase as BaseTestCase
 except ImportError:
@@ -71,12 +71,11 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.lock.release()
         self.assertFalse(self.lock.locked)
 
+    @skipIf(
+        issubclass(_backend_cls(cache), BaseMemcachedCache),
+        "memcached's expire time is not exact as other backends")
     def test_timeout(self):
-        cls = _backend_cls(self.lock.client)
-        if issubclass(cls, BaseMemcachedCache):
-            timeout = 1
-        else:
-            timeout = 0.3
+        timeout = 0.3
         lock_a = lock(self.lock_name, timeout=timeout)
 
         started = time.time()
@@ -91,18 +90,20 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
 
     @skipUnless(
         issubclass(_backend_cls(cache), BaseMemcachedCache),
-        "only called when using memcached backend")
-    def test_memcached(self):
-        sleep = 0.1
-        timeout = 1
-        key = value = "debug"
+        "memcached's expire time is not exact as other backends")
+    def test_timeout_memcached(self):
+        timeout = 2
+        lock_a = lock(self.lock_name, timeout=timeout)
+
         started = time.time()
-        cache.add(key, value, timeout)
-        while not cache.add(key, value, timeout):
-            time.sleep(sleep)
+        self.assertTrue(lock_a.acquire(False))
+        self.assertTrue(self.lock.acquire())
         diff = time.time() - started
-        self.assertGreaterEqual(diff, timeout)
-        self.assertLessEqual(diff, timeout + sleep)
+        self.assertGreaterEqual(diff, timeout - 1)
+        self.assertLessEqual(diff, timeout + self.lock.sleep)
+        self.lock.release()
+        self.assertFalse(lock_a.locked)
+        self.assertWarns(LockWarning, lock_a.release)
 
     def test_block(self):
         block = 0.2

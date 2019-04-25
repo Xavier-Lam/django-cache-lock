@@ -60,7 +60,7 @@ class lock(object):
     """
 
     def __init__(
-        self, name, client=None, timeout=None, sleep=None, blocking=True,
+        self, name, client=None, timeout=None, blocking=True, sleep=None,
         token_generator=None, release_on_del=None, thread_local=True):
         """
         :param timeout: indicates a maximum life for the lock. By default,
@@ -162,24 +162,25 @@ class lock(object):
             return True
         return False
 
-    def release(self, force=False):
+    def release(self, force=False, warns=True):
         """
         Releases the already acquired lock
         :param force: Force to release lock without checking owned
         """
         token = getattr(self.local, "token", None)
         if not token and not force:
-            warn("Cannot release an unlocked lock", LockWarning)
+            warns and warn("Cannot release an unlocked lock", LockWarning)
             return
 
         self._release(token, force)
 
-    def _release(self, token, force=False):
+    def _release(self, token, force=False, warns=True):
         # TODO: use lua script to release redis lock
         setattr(self.local, "token", None)
         locked_token = self.client.get(self.key)
         if token != locked_token and not force:
-            warn("Cannot release a lock that's no longer owned", LockWarning)
+            warns and warn(
+                "Cannot release a lock that's no longer owned", LockWarning)
         else:
             self.client.delete(self.key)
 
@@ -207,8 +208,8 @@ class lock(object):
 
     def __del__(self):
         try:
-            self.release_on_del and self.name and self.release()
-        except Exception:
+            self.release_on_del and self.name and self.release(warns=False)
+        except:
             pass
 
     def __call__(self, func):
@@ -231,7 +232,7 @@ class lock(object):
         """
         defaults = dict(
             name=lock._name, client=lock.client, timeout=lock.timeout,
-            sleep=lock.sleep, blocking=lock.blocking,
+            blocking=lock.blocking, sleep=lock.sleep,
             token_generator=lock.token_generator,
             release_on_del=lock.release_on_del,
             thread_local=isinstance(lock.local, threading.local))
