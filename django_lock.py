@@ -287,12 +287,17 @@ def lock_model(func_or_args=None, *keys, **kw):
 
     """
     refresh_from_db = kw.pop("refresh_from_db", True)
+    lock_name = kw.pop("name", None)
 
     def _get_name(self, *args, **kwargs):
         values = [getattr(self, key) for key in keys]
         kvs = zip(keys, values)
         # TODO: max length of cache key
-        return ":".join(map(lambda o: ":".join(map(str, o)), kvs))
+        prefix = lock_name or "{app_label}:{table}:".format(
+            app_label=self._meta.app_label,
+            table=self._meta.db_table
+        )
+        return prefix + ":".join(map(lambda o: ":".join(map(str, o)), kvs))
 
     def refresh_wrapper(func):
         @wraps(func)

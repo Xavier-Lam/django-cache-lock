@@ -16,7 +16,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="django-cache-lock",
-    version="0.1.0",
+    version="0.1.2",
     author="Xavier-Lam",
     author_email="Lam.Xavier@hotmail.com",
     url="https://github.com/Xavier-Lam/django-cache-lock",

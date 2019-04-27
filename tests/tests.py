@@ -203,7 +203,25 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(unsafe_lock.locked)
 
     def test_model(self):
-        class Foo(f.FakeModel):
+        custom_lock_name = "foo:another_lock:"
+
+        class BaseFakeModel(f.FakeModel):
+            @property
+            def lock_name(self):
+                return "{app_label}:{table}:".format(
+                    app_label=self._meta.app_label,
+                    table=self._meta.db_table
+                )
+
+            @property
+            def pk_lockname(self):
+                return self.lock_name + "pk:" + str(self.id)
+
+            class Meta(object):
+                abstract = True
+                app_label = 'django_fake_models'
+
+        class Foo(BaseFakeModel):
             bar = models.CharField(max_length=8)
 
             @lock_model
@@ -214,22 +232,29 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
             def lock_id(self, callback=None):
                 callback and callback()
 
+            @lock_model(name=custom_lock_name)
+            def another_lockid(self, callback=None):
+                callback and callback()
+
             @lock_model("bar", blocking=False)
             def lock_bar(self, callback=None):
                 callback and callback()
 
             @property
-            def pk_lockname(self):
-                return "pk:" + str(self.id)
-
-            @property
             def bar_lockname(self):
-                return "bar:" + str(self.bar)
+                return self.lock_name + "bar:" + str(self.bar)
+
+        class Another(BaseFakeModel):
+            @lock_model(blocking=False)
+            def lock_id(self, callback=None):
+                callback and callback()
 
         @Foo.fake_me
+        @Another.fake_me
         def test_method():
             a = Foo.objects.create(bar="a")
             b = Foo.objects.create(bar="b")
+            c = Another.objects.create()
 
             self.assertEqual(a.lock_id_no_arg.__name__, "lock_id_no_arg")
             self.assertEqual(a.lock_id.__name__, "lock_id")
@@ -239,6 +264,13 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
                 self.assertTrue(lock(a.pk_lockname).locked)
                 self.assertFalse(lock(b.pk_lockname).locked)
                 self.assertRaises(Locked, a.lock_id)
+                self.assertFalse(lock(c.pk_lockname).locked)
+                c.lock_id()
+                another_lock_name = a.pk_lockname.replace(
+                    a.lock_name, custom_lock_name)
+                self.assertFalse(lock(another_lock_name).locked)
+                a.another_lockid(lambda: self.assertTrue(
+                    lock(another_lock_name).locked))
             a.lock_id_no_arg(callback)
             self.assertFalse(lock(a.pk_lockname).locked)
 
