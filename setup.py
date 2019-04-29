@@ -16,7 +16,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="django-cache-lock",
-    version="0.1.2",
+    version="0.2.0",
     author="Xavier-Lam",
     author_email="Lam.Xavier@hotmail.com",
     url="https://github.com/Xavier-Lam/django-cache-lock",
@@ -29,7 +29,7 @@ setup(
     include_package_data=True,
     test_suite="runtests.main",
     classifiers=[
-        "Development Status :: 2 - Pre-Alpha",
+        "Development Status :: 3 - Alpha",
         "Environment :: Web Environment",
         "Framework :: Django :: 1.11",
         "Framework :: Django :: 2.0",

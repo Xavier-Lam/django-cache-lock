@@ -4,14 +4,28 @@ from __future__ import unicode_literals
 from functools import wraps
 import time
 import threading
+import types
 import uuid
 from warnings import warn
 
 from django.conf import settings
 from django.core.cache import cache, DefaultCacheProxy
 from django.core.cache.backends.db import BaseDatabaseCache
+from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.utils.module_loading import import_string
+
+redis_backends = ()
+try:
+    from django_redis.cache import RedisCache
+    redis_backends = redis_backends + (RedisCache,)
+except ImportError:
+    RedisCache = ()
+try:
+    from redis_cache.backends.base import BaseRedisCache
+    redis_backends = redis_backends + (BaseRedisCache,)
+except ImportError:
+    BaseRedisCache = ()
 
 
 __all__ = (
@@ -74,10 +88,14 @@ class lock(object):
         :type blocking: bool or float
         """
         self.client = client or cache
-        backend_cls = _backend_cls(self.client)
+        self.backend_cls = backend_cls = _backend_cls(self.client)
         if issubclass(backend_cls, BaseDatabaseCache):
             raise NotImplementedError(
                 "We don't support database cache currently")
+        elif issubclass(backend_cls, LocMemCache) and not settings.DEBUG:
+            raise RuntimeError(
+                "DO NOT use locmem cache as lock's backend in a product"
+                "environment")
 
         if callable(name):
             self._name = None
@@ -109,6 +127,10 @@ class lock(object):
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
+
+        if issubclass(backend_cls, redis_backends):
+            self._release_owned = types.MethodType(
+                redis_lock._release_owned, self)
 
     @property
     def name(self):
@@ -172,17 +194,23 @@ class lock(object):
             warns and warn("Cannot release an unlocked lock", LockWarning)
             return
 
-        self._release(token, force)
+        self._release(token, force, warns)
 
     def _release(self, token, force=False, warns=True):
-        # TODO: use lua script to release redis lock
+        # TODO: use cas to release a memcached lock
         setattr(self.local, "token", None)
-        locked_token = self.client.get(self.key)
-        if token != locked_token and not force:
-            warns and warn(
-                "Cannot release a lock that's no longer owned", LockWarning)
-        else:
+        if force:
             self.client.delete(self.key)
+        else:
+            owned = self._release_owned(token)
+            warns and not owned and warn(
+                "Cannot release a lock that's no longer owned", LockWarning)
+
+    def _release_owned(self, token):
+        locked_token = self.client.get(self.key)
+        owned = locked_token and locked_token == token
+        owned and self.client.delete(self.key)
+        return owned
 
     @property
     def locked(self):
@@ -262,6 +290,31 @@ class lock(object):
             return cls(self, name, *args, **kwargs)
 
         cache.__class__.lock = partial_lock
+
+
+class redis_lock(lock):
+    def _release_owned(self, token):
+        from redis.lock import Lock
+
+        if issubclass(self.backend_cls, RedisCache):
+            key = self.client.make_key(self.key)
+            token = self.client.client.encode(token)
+            client = self.client.client.get_client()
+
+        elif issubclass(self.backend_cls, BaseRedisCache):
+            key = self.client.make_key(self.key)
+            token = self.client.serialize(token)
+            client = self.client.get_master_client()
+
+        else:
+            raise NotImplementedError("Unknown redis backend")
+
+        return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
+
+
+class memcached_lock(lock):
+    def _release_owned(self, token):
+        raise NotImplementedError()
 
 
 def lock_model(func_or_args=None, *keys, **kw):

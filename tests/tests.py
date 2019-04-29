@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
+import os
 import threading
 import time
 from unittest import skipIf, skipUnless
@@ -14,13 +15,15 @@ import warnings
 import django
 from django_fake_model import models as f
 from django.core.cache import cache
+from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
 
 from django_lock import (
-    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning)
+    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning,
+    redis_backends)
 
 
 class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
@@ -71,11 +74,17 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.lock.release()
         self.assertFalse(self.lock.locked)
 
+    @skipUnless(
+        issubclass(_backend_cls(cache), redis_backends),
+        "test only when redis backend")
+    def test_release_redis(self):
+        pass
+
     @skipIf(
         issubclass(_backend_cls(cache), BaseMemcachedCache),
         "memcached's expire time is not exact as other backends")
     def test_timeout(self):
-        timeout = 0.3
+        timeout = 1
         lock_a = lock(self.lock_name, timeout=timeout)
 
         started = time.time()
@@ -201,6 +210,24 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         t.join()
         self.assertTrue(self.lock.locked)
         self.assertFalse(unsafe_lock.locked)
+
+    @skipIf(
+        issubclass(_backend_cls(cache), LocMemCache),
+        "locmem cache unable to lock multi proccess workers")
+    def test_proccess(self):
+        another = "another"
+        commands = [
+            "from django_lock import lock",
+            "unlock_lock = lock('%s', blocking=False)" % another,
+            "locked_lock = lock('%s', blocking=False)" % self.lock_name,
+            "unlock_lock.acquire()",
+            "unlock_lock.release()",
+            "exit(0 if locked_lock.locked else 1)"
+        ]
+        codes = ";".join(commands)
+        with self.lock:
+            ret = os.system('django-admin shell -c "%s"' % codes)
+        self.assertEqual(ret, 0)
 
     def test_model(self):
         custom_lock_name = "foo:another_lock:"

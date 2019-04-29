@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/django-cache-lock.svg)](https://pypi.org/project/django-cache-lock)
 [![Build Status](https://travis-ci.org/Xavier-Lam/django-cache-lock.svg?branch=master)](https://travis-ci.org/Xavier-Lam/django-cache-lock)
 
-A simple lock extension for django's cache.
+A simple lock extension for django's cache to prevent concurrent editing.
 
 ## Installation
 Install django-cache-lock by using pip
@@ -49,10 +49,16 @@ A shortcut to lock model instance
 For more usages, please read the [code](django_lock.py).
 
 ## ATTENTIONS
+### locmem backend
+* DO NO USE locmem backend in a product environment.
+
 ### memcached backend
 * Memcached does not support milliseconds expire time, and its' expire time is not very exact. So memcached lock's timeout time is not as exact as other backends.
 
+### redis backend
+* We didn't test distributed redis lock.
+
 ## TODOS:
-* use lua script and memcached's cas to release lock
+* use memcached's cas to release lock
 * reacquire and extend lock
 * database backend cache support
