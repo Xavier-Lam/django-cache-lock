@@ -94,7 +94,7 @@ class lock(object):
                 "We don't support database cache currently")
         elif issubclass(backend_cls, LocMemCache) and not settings.DEBUG:
             raise RuntimeError(
-                "DO NOT use locmem cache as lock's backend in a product"
+                "DO NOT use locmem cache as lock's backend in a product "
                 "environment")
 
         if callable(name):
@@ -129,8 +129,7 @@ class lock(object):
         self.release_on_del = release_on_del
 
         if issubclass(backend_cls, redis_backends):
-            self._release_owned = types.MethodType(
-                redis_lock._release_owned, self)
+            self._release_owned = types.MethodType(_release_owned, self)
 
     @property
     def name(self):
@@ -292,24 +291,27 @@ class lock(object):
         cache.__class__.lock = partial_lock
 
 
+def _release_owned(self, token):
+    from redis.lock import Lock
+
+    if issubclass(self.backend_cls, RedisCache):
+        key = self.client.make_key(self.key)
+        token = self.client.client.encode(token)
+        client = self.client.client.get_client()
+
+    elif issubclass(self.backend_cls, BaseRedisCache):
+        key = self.client.make_key(self.key)
+        token = self.client.serialize(token)
+        client = self.client.get_master_client()
+
+    else:
+        raise NotImplementedError("Unknown redis backend")
+
+    return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
+
+
 class redis_lock(lock):
-    def _release_owned(self, token):
-        from redis.lock import Lock
-
-        if issubclass(self.backend_cls, RedisCache):
-            key = self.client.make_key(self.key)
-            token = self.client.client.encode(token)
-            client = self.client.client.get_client()
-
-        elif issubclass(self.backend_cls, BaseRedisCache):
-            key = self.client.make_key(self.key)
-            token = self.client.serialize(token)
-            client = self.client.get_master_client()
-
-        else:
-            raise NotImplementedError("Unknown redis backend")
-
-        return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
+    _release_owned = _release_owned
 
 
 class memcached_lock(lock):

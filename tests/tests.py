@@ -14,6 +14,7 @@ import warnings
 
 import django
 from django_fake_model import models as f
+from django.conf import settings
 from django.core.cache import cache
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
@@ -35,6 +36,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         if django.VERSION[0] == 2:
             schema.DatabaseSchemaEditor.__enter__ = \
                 schema.BaseDatabaseSchemaEditor.__enter__
+        settings.DEBUG = True
         warnings.simplefilter("ignore")
 
     def setUp(self):
