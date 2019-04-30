@@ -48,6 +48,14 @@ A shortcut to lock model instance
 ## Advanced usage
 For more usages, please read the [code](django_lock.py).
 
+## Supported backends
+* django.core.cache.backends.db
+* django.core.cache.backends.file
+* django.core.cache.backends.locmem
+* django.core.cache.backends.memcached
+* [django-redis](https://github.com/niwinz/django-redis)
+* [django-redis-cache](https://github.com/sebleier/django-redis-cache)
+
 ## ATTENTIONS
 ### locmem backend
 * DO NO USE locmem backend in a product environment.

@@ -23,8 +23,8 @@ from django.db.backends.sqlite3 import schema
 from django.test import TestCase
 
 from django_lock import (
-    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Locked, LockWarning,
-    redis_backends)
+    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Lock, Locked,
+    LockWarning, redis_backends)
 
 
 class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
@@ -137,19 +137,19 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         sleep = DEFAULT_SETTINGS["SLEEP"]
         lock_a = lock(self.lock_name, sleep=sleep)
         with lock_a:
-            with mock.patch.object(lock, "_acquire"):
-                lock._acquire.return_value = False
+            with mock.patch.object(Lock, "_acquire"):
+                Lock._acquire.return_value = False
                 block = sleep*count + sleep/2
                 self.assertFalse(lock_a.acquire(block))
-                self.assertEqual(lock._acquire.call_count, count + 2)
+                self.assertEqual(Lock._acquire.call_count, count + 2)
 
-            with mock.patch.object(lock, "_acquire"):
+            with mock.patch.object(Lock, "_acquire"):
                 sleep = 0.05
-                lock._acquire.return_value = False
+                Lock._acquire.return_value = False
                 lock_b = lock(self.lock_name, sleep=sleep)
                 block = sleep*count + sleep/2
                 self.assertFalse(lock_b.acquire(block))
-                self.assertEqual(lock._acquire.call_count, count + 2)
+                self.assertEqual(Lock._acquire.call_count, count + 2)
 
     def test_token(self):
         with self.lock:

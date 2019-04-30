@@ -4,7 +4,6 @@ from __future__ import unicode_literals
 from functools import wraps
 import time
 import threading
-import types
 import uuid
 from warnings import warn
 
@@ -29,8 +28,8 @@ except ImportError:
 
 
 __all__ = (
-    "DEFAULT_SETTINGS", "IncorrectLock", "lock", "lock_model", "Locked",
-    "LockError")
+    "DEFAULT_SETTINGS", "IncorrectLock", "lock", "lock_model", "Lock",
+    "Locked", "LockError", "LocMemLock", "MemcachedLock", "RedisLock")
 
 
 DEFAULT_SETTINGS = dict(
@@ -68,34 +67,15 @@ class IncorrectLock(LockError):
     pass
 
 
-class lock(object):
+class Lock(object):
     """
     A lock class like `redis.lock.Lock`.
     """
 
     def __init__(
-        self, name, client=None, timeout=None, blocking=True, sleep=None,
-        token_generator=None, release_on_del=None, thread_local=True):
-        """
-        :param timeout: indicates a maximum life for the lock. By default,
-                        it will remain locked until release() is called.
-        :type timeout: float
-        :param sleep: indicates the amount of time to sleep per loop iteration
-                      when the lock is in blocking mode and another client is
-                      currently holding the lock.
-        :type sleep: float
-        :type client: django.core.cache.BaseCache
-        :type blocking: bool or float
-        """
-        self.client = client or cache
-        self.backend_cls = backend_cls = _backend_cls(self.client)
-        if issubclass(backend_cls, BaseDatabaseCache):
-            raise NotImplementedError(
-                "We don't support database cache currently")
-        elif issubclass(backend_cls, LocMemCache) and not settings.DEBUG:
-            raise RuntimeError(
-                "DO NOT use locmem cache as lock's backend in a product "
-                "environment")
+                self, name, client, timeout=None, blocking=True, sleep=None,
+                token_generator=None, release_on_del=None, thread_local=True):
+        self.client = client
 
         if callable(name):
             self._name = None
@@ -107,14 +87,6 @@ class lock(object):
         self.blocking = blocking
         self.sleep = sleep or _get_setting("SLEEP")
 
-        if issubclass(backend_cls, BaseMemcachedCache):
-            # memcached only support int timeout
-            if timeout and not isinstance(timeout, int):
-                warn(
-                    "memcached only support int timeout, your time out will "
-                    "be parse to int, timeout less than one second will be "
-                    "treated as lock forever", LockWarning)
-                timeout = int(timeout)
         if timeout and self.sleep > timeout:
             warn("'sleep' should be less than 'timeout'", LockWarning)
         self.timeout = timeout or None
@@ -127,9 +99,6 @@ class lock(object):
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
-
-        if issubclass(backend_cls, redis_backends):
-            self._release_owned = types.MethodType(_release_owned, self)
 
     @property
     def name(self):
@@ -266,57 +235,91 @@ class lock(object):
         defaults.update(kwargs)
         return cls(**defaults)
 
-    @classmethod
-    def patch_cache(cls):
-        """
-        A dirty method to make lock as an extension method of django's
-        default cache
 
-            class AppConfig(AppConfig):
-                def ready(self):
-                    from django_lock import lock
-                    lock.patch_cache()
+class LocMemLock(Lock):
+    def __init__(self, *args, **kwargs):
+        if not settings.DEBUG:
+            raise RuntimeError(
+                "DO NOT use locmem cache as lock's backend in a product "
+                "environment")
 
-            ...
-
-            from django.core.cache import cache
-            @cache.lock
-            def foo():
-                pass
-
-        """
-        def partial_lock(self, name, *args, **kwargs):
-            return cls(self, name, *args, **kwargs)
-
-        cache.__class__.lock = partial_lock
+        super(LocMemLock, self).__init__(*args, **kwargs)
 
 
-def _release_owned(self, token):
-    from redis.lock import Lock
-
-    if issubclass(self.backend_cls, RedisCache):
-        key = self.client.make_key(self.key)
-        token = self.client.client.encode(token)
-        client = self.client.client.get_client()
-
-    elif issubclass(self.backend_cls, BaseRedisCache):
-        key = self.client.make_key(self.key)
-        token = self.client.serialize(token)
-        client = self.client.get_master_client()
-
-    else:
-        raise NotImplementedError("Unknown redis backend")
-
-    return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
-
-
-class redis_lock(lock):
-    _release_owned = _release_owned
-
-
-class memcached_lock(lock):
+class RedisLock(Lock):
     def _release_owned(self, token):
-        raise NotImplementedError()
+        from redis.lock import Lock
+
+        backend_cls = _backend_cls(self.client)
+        if issubclass(backend_cls, RedisCache):
+            key = self.client.make_key(self.key)
+            token = self.client.client.encode(token)
+            client = self.client.client.get_client()
+
+        elif issubclass(backend_cls, BaseRedisCache):
+            key = self.client.make_key(self.key)
+            token = self.client.serialize(token)
+            client = self.client.get_master_client()
+
+        else:
+            raise NotImplementedError("Unknown redis backend")
+
+        return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
+
+
+class MemcachedLock(Lock):
+    def __init__(self, name, client, timeout=None, *args, **kwargs):
+        # memcached only support int timeout
+        if timeout and not isinstance(timeout, int):
+            warn(
+                "memcached only support int timeout, your time out will "
+                "be parsed to int, timeout less than one second will be "
+                "treated as lock forever", LockWarning)
+            timeout = int(timeout)
+
+        super(MemcachedLock, self).__init__(
+            name, client, timeout, *args, **kwargs)
+
+
+def lock(
+        name, client=None, timeout=None, blocking=True, sleep=None,
+        token_generator=None, release_on_del=None, thread_local=True):
+    """
+    :param timeout: indicates a maximum life for the lock. By default,
+                    it will remain locked until release() is called.
+    :type timeout: float
+    :param sleep: indicates the amount of time to sleep per loop iteration
+                    when the lock is in blocking mode and another client is
+                    currently holding the lock.
+    :type sleep: float
+    :type client: django.core.cache.BaseCache
+    :type blocking: bool or float
+
+        from django_lock import lock
+
+        with lock("global"):
+            pass
+
+        @lock("global")
+        def foo():
+            pass
+    """
+    client = client or cache
+    backend_cls = _backend_cls(client)
+    if issubclass(backend_cls, redis_backends):
+        cls = RedisLock
+    elif issubclass(backend_cls, LocMemCache):
+        cls = LocMemLock
+    elif issubclass(backend_cls, BaseMemcachedCache):
+        cls = MemcachedLock
+    elif issubclass(backend_cls, BaseDatabaseCache):
+        raise NotImplementedError("We don't support database cache yet")
+    else:
+        cls = Lock
+    return cls(
+        name, client, timeout, blocking=blocking, sleep=sleep,
+        token_generator=token_generator, release_on_del=release_on_del,
+        thread_local=thread_local)
 
 
 def lock_model(func_or_args=None, *keys, **kw):
