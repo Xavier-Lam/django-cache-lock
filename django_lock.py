@@ -12,6 +12,7 @@ from django.core.cache import cache, DefaultCacheProxy
 from django.core.cache.backends.db import BaseDatabaseCache
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
+from django.db.models import Model
 from django.utils.module_loading import import_string
 
 redis_backends = ()
@@ -27,9 +28,8 @@ except ImportError:
     BaseRedisCache = ()
 
 
-__all__ = (
-    "DEFAULT_SETTINGS", "IncorrectLock", "lock", "lock_model", "Lock",
-    "Locked", "LockError", "LocMemLock", "MemcachedLock", "RedisLock")
+__all__ = ("DEFAULT_SETTINGS", "IncorrectLock", "lock", "lock_model", "Lock",
+           "Locked", "LockError", "LocMemLock", "MemcachedLock", "RedisLock")
 
 
 DEFAULT_SETTINGS = dict(
@@ -72,9 +72,9 @@ class Lock(object):
     A lock class like `redis.lock.Lock`.
     """
 
-    def __init__(
-                self, name, client, timeout=None, blocking=True, sleep=None,
-                token_generator=None, release_on_del=None, thread_local=True):
+    def __init__(self, name, client, timeout=None, blocking=True, sleep=None,
+                 token_generator=None, release_on_del=None,
+                 thread_local=True):
         self.client = client
 
         if callable(name):
@@ -239,9 +239,8 @@ class Lock(object):
 class LocMemLock(Lock):
     def __init__(self, *args, **kwargs):
         if not settings.DEBUG:
-            raise RuntimeError(
-                "DO NOT use locmem cache as lock's backend in a product "
-                "environment")
+            raise RuntimeError("DO NOT use locmem cache as lock's backend in "
+                               "a product environment")
 
         super(LocMemLock, self).__init__(*args, **kwargs)
 
@@ -281,9 +280,23 @@ class MemcachedLock(Lock):
             name, client, timeout, *args, **kwargs)
 
 
-def lock(
-        name, client=None, timeout=None, blocking=True, sleep=None,
-        token_generator=None, release_on_del=None, thread_local=True):
+def get_lock_cls(client):
+    backend_cls = _backend_cls(client)
+    if issubclass(backend_cls, redis_backends):
+        cls = RedisLock
+    elif issubclass(backend_cls, LocMemCache):
+        cls = LocMemLock
+    elif issubclass(backend_cls, BaseMemcachedCache):
+        cls = MemcachedLock
+    elif issubclass(backend_cls, BaseDatabaseCache):
+        raise NotImplementedError("We don't support database cache yet")
+    else:
+        cls = Lock
+    return cls
+
+
+def lock(name, client=None, timeout=None, blocking=True, sleep=None,
+         token_generator=None, release_on_del=None, thread_local=True):
     """
     :param timeout: indicates a maximum life for the lock. By default,
                     it will remain locked until release() is called.
@@ -305,28 +318,19 @@ def lock(
             pass
     """
     client = client or cache
-    backend_cls = _backend_cls(client)
-    if issubclass(backend_cls, redis_backends):
-        cls = RedisLock
-    elif issubclass(backend_cls, LocMemCache):
-        cls = LocMemLock
-    elif issubclass(backend_cls, BaseMemcachedCache):
-        cls = MemcachedLock
-    elif issubclass(backend_cls, BaseDatabaseCache):
-        raise NotImplementedError("We don't support database cache yet")
-    else:
-        cls = Lock
-    return cls(
-        name, client, timeout, blocking=blocking, sleep=sleep,
-        token_generator=token_generator, release_on_del=release_on_del,
-        thread_local=thread_local)
+    cls = get_lock_cls(client)
+    return cls(name, client, timeout, blocking=blocking, sleep=sleep,
+               token_generator=token_generator, release_on_del=release_on_del,
+               thread_local=thread_local)
 
 
-def lock_model(func_or_args=None, *keys, **kw):
+def lock_model(model_or_func_or_arg=None, *keys, **kw):
     """
     A shortcut to lock a model instance
 
     :param refresh_from_db: reload model from database if locked success
+
+    you can use this function as a decorator for a model's method
 
         from django.db import models
         from django_lock import lock_model
@@ -343,6 +347,10 @@ def lock_model(func_or_args=None, *keys, **kw):
             def bar(self, *args, **kwargs):
                 pass
 
+    or
+
+        with lock_model(instance):
+            pass
     """
     refresh_from_db = kw.pop("refresh_from_db", True)
     lock_name = kw.pop("name", None)
@@ -369,12 +377,28 @@ def lock_model(func_or_args=None, *keys, **kw):
             lock(_get_name, **kw)(
                 refresh_wrapper(func)))
 
-    if func_or_args and callable(func_or_args):
+    arg = model_or_func_or_arg
+    if arg and isinstance(arg, Model):
+        class RefreshModelLockMixin(object):
+            def __enter__(self):
+                super(RefreshModelLockMixin, self).__enter__()
+                arg.refresh_from_db()
+                return self
+
+        keys = keys or ("pk",)
+        name = _get_name(arg)
+        kw.setdefault("client", cache)
+        LockBase = get_lock_cls(kw["client"])
+        lock_cls = type(LockBase.__name__,
+                        (RefreshModelLockMixin, LockBase),
+                        {}) if refresh_from_db else LockBase
+        return lock_cls(name, **kw)
+    elif arg and callable(arg):
         keys = ("pk",)
-        return decorator(func_or_args)
+        return decorator(arg)
     else:
-        if func_or_args:
-            keys = (func_or_args, ) + keys
+        if arg:
+            keys = (arg, ) + keys
         else:
             keys = ("pk",)
 

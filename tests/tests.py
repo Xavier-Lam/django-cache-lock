@@ -22,9 +22,62 @@ from django.db import models
 from django.db.backends.sqlite3 import schema
 from django.test import TestCase
 
-from django_lock import (
-    _backend_cls, DEFAULT_SETTINGS, lock, lock_model, Lock, Locked,
-    LockWarning, redis_backends)
+from django_lock import (_backend_cls, DEFAULT_SETTINGS, lock, lock_model,
+                         Lock, Locked, LockWarning, redis_backends)
+
+
+class BaseFakeModel(f.FakeModel):
+    @property
+    def lock_name(self):
+        return "{app_label}:{table}:".format(
+            app_label=self._meta.app_label,
+            table=self._meta.db_table
+        )
+
+    @property
+    def pk_lockname(self):
+        return self.lock_name + "pk:" + str(self.id)
+
+    class Meta(object):
+        abstract = True
+        app_label = 'django_fake_models'
+
+
+custom_lock_name = "foo:another_lock:"
+
+
+class Foo(BaseFakeModel):
+    bar = models.CharField(max_length=8)
+
+    @lock_model
+    def lock_id_no_arg(self, callback=None):
+        callback and callback()
+
+    @lock_model(blocking=False)
+    def lock_id(self, callback=None):
+        callback and callback()
+
+    @lock_model(name=custom_lock_name)
+    def another_lockid(self, callback=None):
+        callback and callback()
+
+    @lock_model("bar", blocking=False)
+    def lock_bar(self, callback=None):
+        callback and callback()
+
+    @lock_model(refresh_from_db=False)
+    def lock_without_refresh(self):
+        pass
+
+    @property
+    def bar_lockname(self):
+        return self.lock_name + "bar:" + str(self.bar)
+
+
+class Another(BaseFakeModel):
+    @lock_model(blocking=False)
+    def lock_id(self, callback=None):
+        callback and callback()
 
 
 class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
@@ -82,9 +135,8 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     def test_release_redis(self):
         pass
 
-    @skipIf(
-        issubclass(_backend_cls(cache), BaseMemcachedCache),
-        "memcached's expire time is not exact as other backends")
+    @skipIf(issubclass(_backend_cls(cache), BaseMemcachedCache),
+            "memcached's expire time is not exact as other backends")
     def test_timeout(self):
         timeout = 1
         lock_a = lock(self.lock_name, timeout=timeout)
@@ -99,9 +151,8 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(lock_a.locked)
         self.assertWarns(LockWarning, lock_a.release)
 
-    @skipUnless(
-        issubclass(_backend_cls(cache), BaseMemcachedCache),
-        "memcached's expire time is not exact as other backends")
+    @skipUnless(issubclass(_backend_cls(cache), BaseMemcachedCache),
+                "memcached's expire time is not exact as other backends")
     def test_timeout_memcached(self):
         timeout = 2
         lock_a = lock(self.lock_name, timeout=timeout)
@@ -213,9 +264,8 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertTrue(self.lock.locked)
         self.assertFalse(unsafe_lock.locked)
 
-    @skipIf(
-        issubclass(_backend_cls(cache), LocMemCache),
-        "locmem cache unable to lock multi proccess workers")
+    @skipIf(issubclass(_backend_cls(cache), LocMemCache),
+            "locmem cache unable to lock multi proccess workers")
     def test_proccess(self):
         another = "another"
         commands = [
@@ -231,86 +281,78 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
             ret = os.system('django-admin shell -c "%s"' % codes)
         self.assertEqual(ret, 0)
 
+    @Foo.fake_me
+    @Another.fake_me
     def test_model(self):
-        custom_lock_name = "foo:another_lock:"
+        a = Foo.objects.create(bar="a")
+        b = Foo.objects.create(bar="b")
+        c = Another.objects.create()
 
-        class BaseFakeModel(f.FakeModel):
-            @property
-            def lock_name(self):
-                return "{app_label}:{table}:".format(
-                    app_label=self._meta.app_label,
-                    table=self._meta.db_table
-                )
+        self.assertEqual(a.lock_id_no_arg.__name__, "lock_id_no_arg")
+        self.assertEqual(a.lock_id.__name__, "lock_id")
+        self.assertEqual(a.lock_bar.__name__, "lock_bar")
 
-            @property
-            def pk_lockname(self):
-                return self.lock_name + "pk:" + str(self.id)
+        def callback():
+            self.assertTrue(lock(a.pk_lockname).locked)
+            self.assertFalse(lock(b.pk_lockname).locked)
+            self.assertRaises(Locked, a.lock_id)
+            self.assertFalse(lock(c.pk_lockname).locked)
+            c.lock_id()
+            another_lock_name = a.pk_lockname.replace(
+                a.lock_name, custom_lock_name)
+            self.assertFalse(lock(another_lock_name).locked)
+            a.another_lockid(lambda: self.assertTrue(
+                lock(another_lock_name).locked))
+        a.lock_id_no_arg(callback)
+        self.assertFalse(lock(a.pk_lockname).locked)
 
-            class Meta(object):
-                abstract = True
-                app_label = 'django_fake_models'
+        a.lock_id(callback)
+        self.assertFalse(lock(a.pk_lockname).locked)
 
-        class Foo(BaseFakeModel):
-            bar = models.CharField(max_length=8)
+        def callback():
+            self.assertTrue(lock(a.bar_lockname).locked)
+            self.assertFalse(lock(b.bar_lockname).locked)
+            self.assertRaises(Locked, a.lock_bar)
+        a.lock_bar(callback)
+        self.assertFalse(lock(a.bar_lockname).locked)
 
-            @lock_model
-            def lock_id_no_arg(self, callback=None):
-                callback and callback()
+    @Foo.fake_me
+    def test_model_context(self):
+        a = Foo.objects.create(bar="a")
+        b = Foo.objects.create(bar="b")
 
-            @lock_model(blocking=False)
-            def lock_id(self, callback=None):
-                callback and callback()
+        with lock_model(a, blocking=False):
+            self.assertTrue(lock(a.pk_lockname).locked)
+            self.assertFalse(lock(b.pk_lockname).locked)
+            self.assertFalse(lock_model(a, blocking=False).acquire())
+            self.assertRaises(Locked, a.lock_id)
 
-            @lock_model(name=custom_lock_name)
-            def another_lockid(self, callback=None):
-                callback and callback()
+        self.assertFalse(lock(a.pk_lockname).locked)
 
-            @lock_model("bar", blocking=False)
-            def lock_bar(self, callback=None):
-                callback and callback()
+        with lock_model(a, "bar", blocking=False):
+            self.assertTrue(lock(a.bar_lockname).locked)
+            self.assertFalse(lock(b.bar_lockname).locked)
+            self.assertFalse(
+                lock_model(a, "bar", blocking=False).acquire())
+            self.assertRaises(Locked, a.lock_bar)
 
-            @property
-            def bar_lockname(self):
-                return self.lock_name + "bar:" + str(self.bar)
+        self.assertFalse(lock(a.bar_lockname).locked)
 
-        class Another(BaseFakeModel):
-            @lock_model(blocking=False)
-            def lock_id(self, callback=None):
-                callback and callback()
+    @Foo.fake_me
+    def test_model_refresh(self):
+        a = Foo.objects.create(bar="a")
+        with mock.patch.object(Foo, "refresh_from_db"):
+            a.lock_without_refresh()
+            self.assertFalse(Foo.refresh_from_db.called)
 
-        @Foo.fake_me
-        @Another.fake_me
-        def test_method():
-            a = Foo.objects.create(bar="a")
-            b = Foo.objects.create(bar="b")
-            c = Another.objects.create()
+            a.lock_id()
+            self.assertTrue(Foo.refresh_from_db.called)
 
-            self.assertEqual(a.lock_id_no_arg.__name__, "lock_id_no_arg")
-            self.assertEqual(a.lock_id.__name__, "lock_id")
-            self.assertEqual(a.lock_bar.__name__, "lock_bar")
+        with mock.patch.object(Foo, "refresh_from_db"):
+            with lock_model(a, refresh_from_db=False):
+                pass
+            self.assertFalse(Foo.refresh_from_db.called)
 
-            def callback():
-                self.assertTrue(lock(a.pk_lockname).locked)
-                self.assertFalse(lock(b.pk_lockname).locked)
-                self.assertRaises(Locked, a.lock_id)
-                self.assertFalse(lock(c.pk_lockname).locked)
-                c.lock_id()
-                another_lock_name = a.pk_lockname.replace(
-                    a.lock_name, custom_lock_name)
-                self.assertFalse(lock(another_lock_name).locked)
-                a.another_lockid(lambda: self.assertTrue(
-                    lock(another_lock_name).locked))
-            a.lock_id_no_arg(callback)
-            self.assertFalse(lock(a.pk_lockname).locked)
-
-            a.lock_id(callback)
-            self.assertFalse(lock(a.pk_lockname).locked)
-
-            def callback():
-                self.assertTrue(lock(a.bar_lockname).locked)
-                self.assertFalse(lock(b.bar_lockname).locked)
-                self.assertRaises(Locked, a.lock_bar)
-            a.lock_bar(callback)
-            self.assertFalse(lock(a.bar_lockname).locked)
-
-        test_method()
+            with lock_model(a):
+                pass
+            self.assertTrue(Foo.refresh_from_db.called)

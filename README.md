@@ -2,6 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/django-cache-lock.svg)](https://pypi.org/project/django-cache-lock)
 [![Build Status](https://travis-ci.org/Xavier-Lam/django-cache-lock.svg?branch=master)](https://travis-ci.org/Xavier-Lam/django-cache-lock)
+[![Donate with Bitcoin](https://en.cryptobadges.io/badge/micro/1BdJG31zinrMFWxRt2utGBU2jdpv8xSgju)](https://en.cryptobadges.io/donate/1BdJG31zinrMFWxRt2utGBU2jdpv8xSgju)
 
 A simple lock extension for django's cache to prevent concurrent editing.
 

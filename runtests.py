@@ -18,7 +18,7 @@ def main():
         call_command("createcachetable")
 
     TestRunner = get_runner(settings)
-    test_runner = TestRunner()
+    test_runner = TestRunner(debug_mode=True)
     failures = test_runner.run_tests(["tests"])
     sys.exit(bool(failures))
 

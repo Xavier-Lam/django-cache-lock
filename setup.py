@@ -16,7 +16,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="django-cache-lock",
-    version="0.2.1",
+    version="0.2.2",
     author="Xavier-Lam",
     author_email="Lam.Xavier@hotmail.com",
     url="https://github.com/Xavier-Lam/django-cache-lock",
@@ -35,6 +35,7 @@ setup(
         "Framework :: Django :: 2.0",
         "Framework :: Django :: 2.1",
         "Framework :: Django :: 2.2",
+        "Framework :: Django :: 3.0",
         "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
         "Operating System :: MacOS",
@@ -47,6 +48,7 @@ setup(
         "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: Implementation :: CPython",
         "Topic :: Internet :: WWW/HTTP",
         "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
