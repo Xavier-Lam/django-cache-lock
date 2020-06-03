@@ -86,7 +86,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     @classmethod
     def setUpClass(cls):
         super(LockTestCase, cls).setUpClass()
-        if django.VERSION[0] == 2:
+        if django.VERSION[0] >= 2:
             schema.DatabaseSchemaEditor.__enter__ = \
                 schema.BaseDatabaseSchemaEditor.__enter__
         settings.DEBUG = True
