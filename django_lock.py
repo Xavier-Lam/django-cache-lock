@@ -270,10 +270,9 @@ class MemcachedLock(Lock):
     def __init__(self, name, client, timeout=None, *args, **kwargs):
         # memcached only support int timeout
         if timeout and not isinstance(timeout, int):
-            warn(
-                "memcached only support int timeout, your time out will "
-                "be parsed to int, timeout less than one second will be "
-                "treated as lock forever", LockWarning)
+            warn("memcached only support int timeout, your time out will "
+                 "be parsed to int, timeout less than one second will be "
+                 "treated as lock forever", LockWarning)
             timeout = int(timeout)
 
         super(MemcachedLock, self).__init__(
@@ -296,7 +295,8 @@ def get_lock_cls(client):
 
 
 def lock(name, client=None, timeout=None, blocking=True, sleep=None,
-         token_generator=None, release_on_del=None, thread_local=True):
+         token_generator=None, release_on_del=None, thread_local=True,
+         extend_owned=False, mixin_cls=None):
     """
     :param timeout: indicates a maximum life for the lock. By default,
                     it will remain locked until release() is called.
@@ -307,6 +307,9 @@ def lock(name, client=None, timeout=None, blocking=True, sleep=None,
     :type sleep: float
     :type client: django.core.cache.BaseCache
     :type blocking: bool or float
+    :param extend_owned: if extend_owned is True, it won't raise an `Locked`
+                         exception if you already owned this lock, and it will
+                         extend this lock automatically
 
         from django_lock import lock
 
@@ -317,8 +320,13 @@ def lock(name, client=None, timeout=None, blocking=True, sleep=None,
         def foo():
             pass
     """
+    if extend_owned:
+        raise NotImplementedError()
+
     client = client or cache
     cls = get_lock_cls(client)
+    if mixin_cls:
+        cls = type(cls.__name__, (mixin_cls, cls), {})
     return cls(name, client, timeout, blocking=blocking, sleep=sleep,
                token_generator=token_generator, release_on_del=release_on_del,
                thread_local=thread_local)
@@ -387,12 +395,8 @@ def lock_model(model_or_func_or_arg=None, *keys, **kw):
 
         keys = keys or ("pk",)
         name = _get_name(arg)
-        kw.setdefault("client", cache)
-        LockBase = get_lock_cls(kw["client"])
-        lock_cls = type(LockBase.__name__,
-                        (RefreshModelLockMixin, LockBase),
-                        {}) if refresh_from_db else LockBase
-        return lock_cls(name, **kw)
+        mixin_cls = refresh_from_db and RefreshModelLockMixin
+        return lock(name, mixin_cls=mixin_cls, **kw)
     elif arg and callable(arg):
         keys = ("pk",)
         return decorator(arg)
