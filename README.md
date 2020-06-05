@@ -39,6 +39,13 @@ A shortcut to lock model instance
         def lock_bar(self):
             pass
 
+        def nolock(self):
+            pass
+
+    foo = Foo()
+    with lock_model(foo, blocking=False):
+        nolock()
+
 ## Configurations
 | key | default | desc |
 | --- | --- | --- |
@@ -59,7 +66,7 @@ For more usages, please read the [code](django_lock.py).
 
 ## ATTENTIONS
 ### locmem backend
-* DO NO USE locmem backend in a product environment.
+* DO NOT USE locmem backend in a product environment.
 
 ### memcached backend
 * Memcached does not support milliseconds expire time, and its' expire time is not very exact. So memcached lock's timeout time is not as exact as other backends.

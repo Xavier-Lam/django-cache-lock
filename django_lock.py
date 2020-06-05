@@ -246,9 +246,16 @@ class LocMemLock(Lock):
 
 
 class RedisLock(Lock):
-    def _release_owned(self, token):
-        from redis.lock import Lock
+    LUA_RELEASE_SCRIPT = """
+        local token = redis.call('get', KEYS[1])
+        if not token or token ~= ARGV[1] then
+            return 0
+        end
+        redis.call('del', KEYS[1])
+        return 1
+    """
 
+    def _release_owned(self, token):
         backend_cls = _backend_cls(self.client)
         if issubclass(backend_cls, RedisCache):
             key = self.client.make_key(self.key)
@@ -263,7 +270,7 @@ class RedisLock(Lock):
         else:
             raise NotImplementedError("Unknown redis backend")
 
-        return client.eval(Lock.LUA_RELEASE_SCRIPT, 1, key, token)
+        return client.eval(self.LUA_RELEASE_SCRIPT, 1, key, token)
 
 
 class MemcachedLock(Lock):
