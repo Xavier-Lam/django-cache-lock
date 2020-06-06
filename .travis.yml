@@ -8,7 +8,7 @@ matrix:
       python: "2.7"
     - env: TOX_ENV='py34-django{111,20}-{locmem,file,memcached,redis_cache,django_redis}'
       python: "3.4"
-    - env: TOX_ENV='py35-django{111,20,21,22,30}-{locmem,file,memcached,redis_cache,django_redis}'
+    - env: TOX_ENV='py35-django{111,20,21,22}-{locmem,file,memcached,redis_cache,django_redis}'
       python: "3.5"
     - env: TOX_ENV='py36-django{111,20,21,22,30}-{locmem,file,memcached,redis_cache,django_redis}'
       python: "3.6"
