@@ -1,6 +1,8 @@
 from .locmem import *
 
 
+UNIT_TIME = 1
+
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",

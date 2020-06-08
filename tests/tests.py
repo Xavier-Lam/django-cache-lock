@@ -15,7 +15,9 @@ import warnings
 import django
 from django_fake_model import models as f
 from django.conf import settings
+from django.core import management
 from django.core.cache import cache
+from django.core.cache.backends.db import DatabaseCache
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.db import models
@@ -91,6 +93,8 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
                 schema.BaseDatabaseSchemaEditor.__enter__
         settings.DEBUG = True
         warnings.simplefilter("ignore")
+        if issubclass(_backend_cls(cache), DatabaseCache):
+            management.call_command("createcachetable")
 
     def setUp(self):
         self.lock = lock(self.lock_name)
@@ -151,7 +155,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         self.assertFalse(self.lock.owned)
         self.assertFalse(self.lock.locked)
 
-        self.assertTrue(lock_a.acquire())
+        self.assertTrue(lock_a.acquire(False))
         self.assertTrue(lock_a.extend())
         self.assertTrue(lock_a.owned)
         time.sleep(1.5*settings.UNIT_TIME)

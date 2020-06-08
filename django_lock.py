@@ -284,10 +284,10 @@ class RedisLock(Lock):
         end
 
         local newttl = ARGV[2]
-        if newttl then
-            redis.call('pexpire', KEYS[1], newttl)
-        else
+        if newttl == '0' then
             redis.call('persist', KEYS[1])
+        else
+            redis.call('pexpire', KEYS[1], newttl)
         end
         return 1
     """
