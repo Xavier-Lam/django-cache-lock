@@ -10,6 +10,8 @@ DEBUG = True
 
 SECRET_KEY = "fake-key"
 
+UNIT_TIME = 0.2
+
 
 INSTALLED_APPS = [
 ]

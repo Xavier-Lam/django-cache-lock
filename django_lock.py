@@ -204,7 +204,10 @@ class Lock(object):
     def _extend(self, token, additional_time):
         locked_token = self.client.get(self.key)
         owned = locked_token and locked_token == token
-        owned and self.client.set(self.key, locked_token, additional_time)
+        if owned:
+            self.client.set(self.key, locked_token, additional_time)
+        else:
+            self.local.token = None
         return owned
 
     @property
@@ -316,7 +319,7 @@ class RedisLock(Lock):
         keys = keys or tuple()
         args = args or tuple()
         numkeys = len(keys)
-        return self._redis.eval(script, numkeys, *keys, *args)
+        return self._redis.eval(script, numkeys, *(keys + args))
 
     def _release_owned(self, token):
         token = self._serialize(token)
@@ -409,15 +412,12 @@ def lock(name, client=None, timeout=None, blocking=True, sleep=None,
         def foo():
             pass
     """
-    if extend_owned:
-        raise NotImplementedError()
-
     client = client or cache
     bases = bases or tuple()
     cls = get_lock_cls(client, *(bases + (LockContext,)))
     return cls(name, client, timeout, blocking=blocking, sleep=sleep,
                token_generator=token_generator, release_on_del=release_on_del,
-               thread_local=thread_local)
+               thread_local=thread_local, extend_owned=extend_owned)
 
 
 def lock_model(model_or_func_or_arg=None, *keys, **kw):

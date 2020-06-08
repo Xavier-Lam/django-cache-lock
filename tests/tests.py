@@ -125,8 +125,10 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         lock_a = lock(self.lock_name)
         # redis in python2.7 sometimes won't raise LockWarning
         self.assertWarns(LockWarning, lock_a.release)
+        self.assertTrue(self.lock.owned)
         self.assertTrue(self.lock.locked)
         self.lock.release()
+        self.assertFalse(self.lock.owned)
         self.assertFalse(self.lock.locked)
 
         # TODO: release a lock no longer owned
@@ -138,49 +140,61 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         pass
 
     def test_extend(self):
+        lock_a = lock(self.lock_name, timeout=settings.UNIT_TIME)
         self.assertTrue(self.lock.acquire())
         self.assertTrue(self.lock.extend())
+        self.assertTrue(self.lock.owned)
+        self.assertFalse(lock_a.extend())
+        self.assertFalse(lock_a.owned)
         self.lock.client.delete(self.lock.key)
         self.assertFalse(self.lock.extend())
+        self.assertFalse(self.lock.owned)
+        self.assertFalse(self.lock.locked)
 
-        lock_a = lock(self.lock_name, timeout=1)
         self.assertTrue(lock_a.acquire())
         self.assertTrue(lock_a.extend())
-        time.sleep(1.5)
+        self.assertTrue(lock_a.owned)
+        time.sleep(1.5*settings.UNIT_TIME)
         self.assertFalse(lock_a.extend())
+        self.assertFalse(lock_a.owned)
+        self.assertFalse(lock_a.locked)
+
+        self.assertTrue(lock_a.acquire())
+        self.assertTrue(lock_a.extend(None))
+        self.assertTrue(lock_a.owned)
+        time.sleep(1.5*settings.UNIT_TIME)
+        self.assertTrue(lock_a.owned)
+        self.assertTrue(lock_a.extend(2*settings.UNIT_TIME))
+        time.sleep(1.5*settings.UNIT_TIME)
+        self.assertTrue(lock_a.owned)
+        time.sleep(settings.UNIT_TIME)
+        self.assertFalse(lock_a.extend())
+        self.assertFalse(lock_a.owned)
+        self.assertFalse(lock_a.locked)
 
     def test_acquire_extend(self):
-        pass
+        lock_a = lock(self.lock_name, extend_owned=True)
+        self.assertTrue(lock_a.acquire())
+        self.assertTrue(lock_a.acquire())
+        with mock.patch.object(lock_a, "extend"),\
+             mock.patch.object(lock_a, "_acquire"):
+            lock_a.extend.return_value = True
+            self.assertTrue(lock_a.acquire())
+            self.assertTrue(lock_a.extend.called)
+            self.assertFalse(lock_a._acquire.called)
 
-    @skipIf(issubclass(_backend_cls(cache), BaseMemcachedCache),
-            "memcached's expire time is not exact as other backends")
     def test_timeout(self):
-        timeout = 1
+        timeout = 2*settings.UNIT_TIME
         lock_a = lock(self.lock_name, timeout=timeout)
 
         started = time.time()
         self.assertTrue(lock_a.acquire(False))
         self.assertTrue(self.lock.acquire())
         diff = time.time() - started
-        self.assertGreaterEqual(diff, timeout)
+        self.assertGreaterEqual(diff, timeout - settings.UNIT_TIME)
         self.assertLessEqual(diff, timeout + self.lock.sleep)
         self.lock.release()
-        self.assertFalse(lock_a.locked)
-        self.assertWarns(LockWarning, lock_a.release)
-
-    @skipUnless(issubclass(_backend_cls(cache), BaseMemcachedCache),
-                "memcached's expire time is not exact as other backends")
-    def test_timeout_memcached(self):
-        timeout = 2
-        lock_a = lock(self.lock_name, timeout=timeout)
-
-        started = time.time()
-        self.assertTrue(lock_a.acquire(False))
-        self.assertTrue(self.lock.acquire())
-        diff = time.time() - started
-        self.assertGreaterEqual(diff, timeout - 1)
-        self.assertLessEqual(diff, timeout + self.lock.sleep)
-        self.lock.release()
+        self.assertFalse(lock_a.owned)
         self.assertFalse(lock_a.locked)
         self.assertWarns(LockWarning, lock_a.release)
 
@@ -227,20 +241,20 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
 
     def test_context(self):
         with self.lock:
-            self.assertTrue(self.lock.locked)
-        self.assertFalse(self.lock.locked)
+            self.assertTrue(self.lock.owned)
+        self.assertFalse(self.lock.owned)
 
     def test_decorator(self):
         lock_a = lock(self.lock_name, blocking=False)
 
         @lock_a
         def resource():
-            self.assertTrue(lock_a.locked)
+            self.assertTrue(lock_a.owned)
             self.assertRaises(Locked, resource)
 
         self.assertEqual(resource.__name__, "resource")
         resource()
-        self.assertFalse(lock_a.locked)
+        self.assertFalse(lock_a.owned)
 
     def test_dynamicname(self):
         name = "1.2"
@@ -269,7 +283,9 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
 
         def another_thread():
             self.assertWarns(LockWarning, self.lock.release)
+            self.assertFalse(self.lock.owned)
             self.assertTrue(self.lock.locked)
+            self.assertTrue(unsafe_lock.owned)
             unsafe_lock.release()
             self.assertFalse(unsafe_lock.locked)
 
@@ -278,7 +294,7 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
         t = threading.Thread(target=another_thread)
         t.start()
         t.join()
-        self.assertTrue(self.lock.locked)
+        self.assertTrue(self.lock.owned)
         self.assertFalse(unsafe_lock.locked)
 
     @skipIf(issubclass(_backend_cls(cache), LocMemCache),
