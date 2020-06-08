@@ -123,15 +123,17 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     def test_release(self):
         self.assertTrue(self.lock.acquire())
         lock_a = lock(self.lock_name)
-        # redis in python2.7 sometimes not raise LockWarning
+        # redis in python2.7 sometimes won't raise LockWarning
         self.assertWarns(LockWarning, lock_a.release)
         self.assertTrue(self.lock.locked)
         self.lock.release()
         self.assertFalse(self.lock.locked)
 
-    @skipUnless(
-        issubclass(_backend_cls(cache), redis_backends),
-        "test only when redis backend")
+        # TODO: release a lock no longer owned
+        pass
+
+    @skipUnless(issubclass(_backend_cls(cache), redis_backends),
+                "test only when redis backend")
     def test_release_redis(self):
         pass
 

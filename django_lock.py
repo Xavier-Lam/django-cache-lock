@@ -14,6 +14,7 @@ from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
 from django.db.models import Model
 from django.utils.module_loading import import_string
+import six
 
 redis_backends = ()
 try:
@@ -73,16 +74,10 @@ class Lock(object):
     """
 
     def __init__(self, name, client, timeout=None, blocking=True, sleep=None,
-                 token_generator=None, release_on_del=None,
-                 thread_local=True):
+                 token_generator=None, release_on_del=None, thread_local=True,
+                 extend_owned=False):
         self.client = client
-
-        if callable(name):
-            self._name = None
-            self.name_generator = name
-        else:
-            self._name = name
-            self.name_generator = None
+        self.name = name
 
         self.blocking = blocking
         self.sleep = sleep or _get_setting("SLEEP")
@@ -99,12 +94,7 @@ class Lock(object):
         if release_on_del is None:
             release_on_del = _get_setting("RELEASEONDEL")
         self.release_on_del = release_on_del
-
-    @property
-    def name(self):
-        if not self._name:
-            raise IncorrectLock("lock's name must be str")
-        return self._name
+        self.extend_owned = extend_owned
 
     @property
     def key(self):
@@ -112,6 +102,8 @@ class Lock(object):
         The lock's key stores in the cache
         """
         prefix = _get_setting("PREFIX")
+        if not isinstance(self.name, six.string_types):
+            raise IncorrectLock("lock's name must be str, got %s" % self.name)
         return prefix + self.name
 
     def acquire_raise(self, blocking=None, token=None):
@@ -132,6 +124,9 @@ class Lock(object):
         :type blocking: bool or float
         :type token: str
         """
+        if self.extend_owned and self.owned and self.extend():
+            return True
+
         if token is None:
             token = str(self.token_generator())
         if blocking is None:
@@ -180,6 +175,38 @@ class Lock(object):
         owned and self.client.delete(self.key)
         return owned
 
+    def extend_raise(self, additional_time=False):
+        """
+        Raise an `django_lock.IncorrectLock` error when extend failed
+        :raises: django_lock.IncorrectLock
+        """
+        msg = self._extend_msg(additional_time)
+        if msg:
+            raise IncorrectLock(msg)
+
+    def extend(self, additional_time=False):
+        """
+        Adds more time to an already acquired lock.
+        """
+        return not self._extend_msg(additional_time)
+
+    def _extend_msg(self, additional_time=False):
+        if additional_time is False:
+            additional_time = self.timeout
+
+        token = getattr(self.local, "token", None)
+        if not token:
+            return "Cannot extend an unlocked lock"
+
+        if not self._extend(token, additional_time):
+            return "Cannot extend a lock that's no longer owned"
+
+    def _extend(self, token, additional_time):
+        locked_token = self.client.get(self.key)
+        owned = locked_token and locked_token == token
+        owned and self.client.set(self.key, locked_token, additional_time)
+        return owned
+
     @property
     def locked(self):
         """
@@ -208,39 +235,31 @@ class Lock(object):
         except:
             pass
 
-    def __call__(self, func):
-        @wraps(func)
-        def inner(*args, **kwargs):
-            if self.name_generator:
-                name = self.name_generator(*args, **kwargs)
-                context = self._from_lock(self, name=name)
-            else:
-                context = self
-            with context:
-                return func(*args, **kwargs)
-        return inner
-
     @classmethod
     def _from_lock(cls, lock, **kwargs):
         """
         Create a lock from another
         :type lock: django_lock.lock
         """
-        defaults = dict(
-            name=lock._name, client=lock.client, timeout=lock.timeout,
-            blocking=lock.blocking, sleep=lock.sleep,
-            token_generator=lock.token_generator,
-            release_on_del=lock.release_on_del,
-            thread_local=isinstance(lock.local, threading.local))
+        defaults = dict(name=lock.name, client=lock.client,
+                        timeout=lock.timeout, blocking=lock.blocking,
+                        sleep=lock.sleep,
+                        token_generator=lock.token_generator,
+                        release_on_del=lock.release_on_del,
+                        thread_local=isinstance(lock.local, threading.local),
+                        extend_owned=lock.extend_owned)
         defaults.update(kwargs)
         return cls(**defaults)
 
 
 class LocMemLock(Lock):
     def __init__(self, *args, **kwargs):
+        msg = ("DO NOT use locmem cache as lock's backend in a product "
+               "environment")
         if not settings.DEBUG:
-            raise RuntimeError("DO NOT use locmem cache as lock's backend in "
-                               "a product environment")
+            raise RuntimeError(msg)
+        else:
+            warn(msg, LockWarning)
 
         super(LocMemLock, self).__init__(*args, **kwargs)
 
@@ -255,22 +274,60 @@ class RedisLock(Lock):
         return 1
     """
 
-    def _release_owned(self, token):
+    LUA_EXTEND_SCRIPT = """
+        local token = redis.call('get', KEYS[1])
+        if not token or token ~= ARGV[1] then
+            return 0
+        end
+
+        local newttl = ARGV[2]
+        if newttl then
+            redis.call('pexpire', KEYS[1], newttl)
+        else
+            redis.call('persist', KEYS[1])
+        end
+        return 1
+    """
+
+    @property
+    def _key(self):
+        return self.client.make_key(self.key)
+
+    @property
+    def _redis(self):
         backend_cls = _backend_cls(self.client)
         if issubclass(backend_cls, RedisCache):
-            key = self.client.make_key(self.key)
-            token = self.client.client.encode(token)
-            client = self.client.client.get_client()
-
+            return self.client.client.get_client()
         elif issubclass(backend_cls, BaseRedisCache):
-            key = self.client.make_key(self.key)
-            token = self.client.serialize(token)
-            client = self.client.get_master_client()
-
+            return self.client.get_master_client()
         else:
             raise NotImplementedError("Unknown redis backend")
 
-        return client.eval(self.LUA_RELEASE_SCRIPT, 1, key, token)
+    def _serialize(self, data):
+        backend_cls = _backend_cls(self.client)
+        if issubclass(backend_cls, RedisCache):
+            return self.client.client.encode(data)
+        elif issubclass(backend_cls, BaseRedisCache):
+            return self.client.serialize(data)
+        else:
+            raise NotImplementedError("Unknown redis backend")
+
+    def _eval(self, script, keys=None, args=None):
+        keys = keys or tuple()
+        args = args or tuple()
+        numkeys = len(keys)
+        return self._redis.eval(script, numkeys, *keys, *args)
+
+    def _release_owned(self, token):
+        token = self._serialize(token)
+        return self._eval(self.LUA_RELEASE_SCRIPT,
+                          keys=(self._key,), args=(token,))
+
+    def _extend(self, token, additional_time):
+        token = self._serialize(token)
+        expires_in = int(1000*(additional_time or 0))
+        return self._eval(self.LUA_EXTEND_SCRIPT,
+                          keys=(self._key,), args=(token, expires_in))
 
 
 class MemcachedLock(Lock):
@@ -286,7 +343,7 @@ class MemcachedLock(Lock):
             name, client, timeout, *args, **kwargs)
 
 
-def get_lock_cls(client):
+def get_lock_cls(client, *bases):
     backend_cls = _backend_cls(client)
     if issubclass(backend_cls, redis_backends):
         cls = RedisLock
@@ -298,12 +355,37 @@ def get_lock_cls(client):
         raise NotImplementedError("We don't support database cache yet")
     else:
         cls = Lock
-    return cls
+    return type(cls.__name__, bases + (cls,), {}) if bases else cls
+
+
+class LockContext(object):
+    name_generator = None
+
+    def __init__(self, name, *args, **kwargs):
+        if callable(name):
+            self.name_generator = name
+            name = None
+        super(LockContext, self).__init__(name, *args, **kwargs)
+
+    def __call__(self, func):
+        @wraps(func)
+        def inner(*args, **kwargs):
+            if not self.name and self.name_generator:
+                context = self._from_args(*args, **kwargs)
+            else:
+                context = self
+            with context:
+                return func(*args, **kwargs)
+        return inner
+
+    def _from_args(self, *args, **kwargs):
+        name = self.name_generator(*args, **kwargs)
+        return self._from_lock(self, name=name)
 
 
 def lock(name, client=None, timeout=None, blocking=True, sleep=None,
          token_generator=None, release_on_del=None, thread_local=True,
-         extend_owned=False, mixin_cls=None):
+         extend_owned=False, bases=None):
     """
     :param timeout: indicates a maximum life for the lock. By default,
                     it will remain locked until release() is called.
@@ -331,9 +413,8 @@ def lock(name, client=None, timeout=None, blocking=True, sleep=None,
         raise NotImplementedError()
 
     client = client or cache
-    cls = get_lock_cls(client)
-    if mixin_cls:
-        cls = type(cls.__name__, (mixin_cls, cls), {})
+    bases = bases or tuple()
+    cls = get_lock_cls(client, *(bases + (LockContext,)))
     return cls(name, client, timeout, blocking=blocking, sleep=sleep,
                token_generator=token_generator, release_on_del=release_on_del,
                thread_local=thread_local)
@@ -367,50 +448,49 @@ def lock_model(model_or_func_or_arg=None, *keys, **kw):
         with lock_model(instance):
             pass
     """
-    refresh_from_db = kw.pop("refresh_from_db", True)
-    lock_name = kw.pop("name", None)
 
-    def _get_name(self, *args, **kwargs):
-        values = [getattr(self, key) for key in keys]
-        kvs = zip(keys, values)
-        # TODO: max length of cache key
-        prefix = lock_name or "{app_label}:{table}:".format(
-            app_label=self._meta.app_label,
-            table=self._meta.db_table
-        )
-        return prefix + ":".join(map(lambda o: ":".join(map(str, o)), kvs))
+    class ModelLockMixin(object):
+        model = None
 
-    def refresh_wrapper(func):
-        @wraps(func)
-        def decorated_func(self, *args, **kwargs):
-            refresh_from_db and self.refresh_from_db()
-            return func(self, *args, **kwargs)
-        return decorated_func
+        def __init__(self, name, *args, **kwargs):
+            if isinstance(name, Model):
+                self.model = name
+                name = self.name_generator(name)
+            super(ModelLockMixin, self).__init__(name, *args, **kwargs)
 
-    def decorator(func):
-        return wraps(func)(
-            lock(_get_name, **kw)(
-                refresh_wrapper(func)))
+        def name_generator(self, model, *args, **kwargs):
+            values = [getattr(model, key) for key in keys]
+            kvs = zip(keys, values)
+            # TODO: max length of cache key
+            prefix = self.lock_name or "{app_label}:{table}:".format(
+                app_label=model._meta.app_label,
+                table=model._meta.db_table
+            )
+            return prefix + ":".join(map(lambda o: ":".join(map(str, o)), kvs))
+
+        def __enter__(self):
+            super(ModelLockMixin, self).__enter__()
+            self.refresh_from_db and self.model.refresh_from_db()
+            return self
+
+        def _from_args(self, model, *args, **kwargs):
+            rv = super(ModelLockMixin, self)._from_args(model, *args, **kwargs)
+            rv.model = model
+            return rv
+
+    ModelLockMixin.refresh_from_db = kw.pop("refresh_from_db", True)
+    ModelLockMixin.lock_name = kw.pop("name", None)
+
+    decorator = lock(None, bases=(ModelLockMixin,), **kw)
 
     arg = model_or_func_or_arg
     if arg and isinstance(arg, Model):
-        class RefreshModelLockMixin(object):
-            def __enter__(self):
-                super(RefreshModelLockMixin, self).__enter__()
-                arg.refresh_from_db()
-                return self
-
         keys = keys or ("pk",)
-        name = _get_name(arg)
-        mixin_cls = refresh_from_db and RefreshModelLockMixin
-        return lock(name, mixin_cls=mixin_cls, **kw)
+        return lock(arg, bases=(ModelLockMixin,), **kw)
     elif arg and callable(arg):
         keys = ("pk",)
         return decorator(arg)
     else:
-        if arg:
-            keys = (arg, ) + keys
-        else:
-            keys = ("pk",)
+        keys = ((arg,) + keys) if arg else ("pk",)
 
         return decorator
