@@ -17,10 +17,6 @@ matrix:
     - env: TOX_ENV='py38-django{111,20,21,22,30}-{locmem,file,memcached,redis_cache,django_redis}'
       python: "3.8"
 
-branches:
-  only:
-    - master
-
 install:
   - pip install tox
 
