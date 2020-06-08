@@ -137,6 +137,21 @@ class LockTestCase(type(str("TestCase"), (TestCase, BaseTestCase), dict())):
     def test_release_redis(self):
         pass
 
+    def test_extend(self):
+        self.assertTrue(self.lock.acquire())
+        self.assertTrue(self.lock.extend())
+        self.lock.client.delete(self.lock.key)
+        self.assertFalse(self.lock.extend())
+
+        lock_a = lock(self.lock_name, timeout=1)
+        self.assertTrue(lock_a.acquire())
+        self.assertTrue(lock_a.extend())
+        time.sleep(1.5)
+        self.assertFalse(lock_a.extend())
+
+    def test_acquire_extend(self):
+        pass
+
     @skipIf(issubclass(_backend_cls(cache), BaseMemcachedCache),
             "memcached's expire time is not exact as other backends")
     def test_timeout(self):
