@@ -8,7 +8,13 @@ import uuid
 from warnings import warn
 
 from django.conf import settings
-from django.core.cache import cache, DefaultCacheProxy
+from django.core.cache import cache, DEFAULT_CACHE_ALIAS
+try:
+    from django.core.cache import DefaultCacheProxy
+    ConnectionProxy = None
+except ImportError:
+    from django.utils.connection import ConnectionProxy
+    DefaultCacheProxy = None
 from django.core.cache.backends.db import BaseDatabaseCache
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends.memcached import BaseMemcachedCache
@@ -41,7 +47,10 @@ DEFAULT_SETTINGS = dict(
 
 def _backend_cls(client):
     backend_cls = type(client)
-    if backend_cls is DefaultCacheProxy:
+    if DefaultCacheProxy and backend_cls is DefaultCacheProxy:
+        cls = settings.CACHES["default"]["BACKEND"]
+        backend_cls = import_string(cls)
+    elif ConnectionProxy and backend_cls._alias == DEFAULT_CACHE_ALIAS:
         cls = settings.CACHES["default"]["BACKEND"]
         backend_cls = import_string(cls)
     return backend_cls
