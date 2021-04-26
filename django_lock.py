@@ -50,7 +50,7 @@ def _backend_cls(client):
     if DefaultCacheProxy and backend_cls is DefaultCacheProxy:
         cls = settings.CACHES["default"]["BACKEND"]
         backend_cls = import_string(cls)
-    elif ConnectionProxy and backend_cls._alias == DEFAULT_CACHE_ALIAS:
+    elif ConnectionProxy and client._alias == DEFAULT_CACHE_ALIAS:
         cls = settings.CACHES["default"]["BACKEND"]
         backend_cls = import_string(cls)
     return backend_cls
