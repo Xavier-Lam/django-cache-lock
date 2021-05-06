@@ -3,6 +3,7 @@ on:
   release:
     branches:
       - 'master'
+    types: [created]
 jobs:
   build-n-publish:
     name: build-n-publish
