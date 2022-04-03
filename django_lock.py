@@ -294,6 +294,12 @@ class MemcachedLock(Lock):
         super(MemcachedLock, self).__init__(
             name, client, timeout, *args, **kwargs)
 
+        
+class DatabaseLock(Lock):
+
+    def __init__(self, *args, **kwargs):
+        super(DatabaseLock, self).__init__(*args, **kwargs)
+
 
 def get_lock_cls(client):
     backend_cls = _backend_cls(client)
@@ -304,7 +310,7 @@ def get_lock_cls(client):
     elif issubclass(backend_cls, BaseMemcachedCache):
         cls = MemcachedLock
     elif issubclass(backend_cls, BaseDatabaseCache):
-        raise NotImplementedError("We don't support database cache yet")
+        cls = DatabaseLock
     else:
         cls = Lock
     return cls
